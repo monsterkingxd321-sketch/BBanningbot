@@ -2,6 +2,11 @@ import asyncio
 import os
 import sys
 
+# Ensure ben directory is on sys.path so it runs seamlessly from root or inside ben
+current_dir = os.path.abspath(os.path.dirname(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -53,6 +58,46 @@ _HANDLER_MODULES = (
 from utils.review_scheduler import ReviewScheduler
 from utils.campaign_scheduler import CampaignScheduler
 
+async def _start_health_server():
+    """Start lightweight HTTP server when deployed on cloud services expecting a web port (e.g. Render Web Service)."""
+    port_str = os.environ.get("PORT")
+    if not port_str:
+        return None
+    try:
+        port = int(port_str)
+    except ValueError:
+        return None
+
+    async def handle_client(reader, writer):
+        try:
+            await reader.readline()
+            response = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: 18\r\n"
+                b"Connection: close\r\n\r\n"
+                b"ReportingBot Live!"
+            )
+            writer.write(response)
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    try:
+        server = await asyncio.start_server(handle_client, "0.0.0.0", port)
+        print(f"Health check web server running on port {port}")
+        return server
+    except Exception as e:
+        print(f"Health server note: {e}")
+        return None
+
+
 async def main():
     """Main function to run the bot"""
     print("Bot starting...")
@@ -87,6 +132,7 @@ async def main():
     
     log_activity("Bot started")
 
+    health_server = await _start_health_server()
     scheduler = ReviewScheduler(bot, db)
     scheduler.start()
     db.reset_interrupted_campaigns()
@@ -96,6 +142,12 @@ async def main():
         # Keep the bot running
         await bot.run_until_disconnected()
     finally:
+        if health_server is not None:
+            try:
+                health_server.close()
+                await health_server.wait_closed()
+            except Exception:
+                pass
         await campaign_scheduler.stop()
         await scheduler.stop()
 

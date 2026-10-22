@@ -1,1 +1,3 @@
-worker: cd ben && python -u main.py
+web: python -u ben/main.py
+worker: python -u ben/main.py
+

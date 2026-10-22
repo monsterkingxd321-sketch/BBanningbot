@@ -498,33 +498,29 @@ class ReportEngine:
                     log_activity(f"Failed to get entity for {chat_id}: {str(e)}")
                     return False
 
-            reason_obj = types.InputReportReasonSpam()
-            if reason == "child_abuse":
-                reason_obj = types.InputReportReasonChildAbuse()
-            elif reason == "violence":
-                reason_obj = types.InputReportReasonViolence()
-            elif reason in ("illegal_drugs", "illegal_activities"):
-                reason_obj = types.InputReportReasonIllegalDrugs()
-            elif reason == "pornography":
-                reason_obj = types.InputReportReasonPornography()
-            elif reason in ("scam", "fake"):
-                reason_obj = types.InputReportReasonFake()
-            elif reason == "copyright":
-                reason_obj = types.InputReportReasonCopyright()
-            elif reason == "personal_details":
-                reason_obj = types.InputReportReasonPersonalDetails()
-            elif reason == "geo_irrelevant":
-                reason_obj = types.InputReportReasonGeoIrrelevant()
-            elif reason == "other":
-                reason_obj = types.InputReportReasonOther()
+            # Official Telegram option bytes for ReportRequest (Layer 158+)
+            TELEGRAM_OPTION_MAP = {
+                "child_abuse": b"2",       # 32 (Child abuse)
+                "violence": b"3",          # 33 (Violence)
+                "illegal_drugs": b"42",    # 3432 (Drugs)
+                "illegal_activities": b"4",# 34 (Illegal goods and services)
+                "pornography": b"57",      # 3537 (Pornography)
+                "fake": b"7",              # 37 (Scam or fraud)
+                "scam": b"7",              # 37 (Scam or fraud)
+                "personal_details": b"6",  # 36 (Personal data)
+                "copyright": b"8",         # 38 (Copyright)
+                "spam": b"9",              # 39 (Spam)
+                "other": b"a",             # 61 (Other)
+                "geo_irrelevant": b"b",    # 62 (It's not illegal, but must be taken down)
+            }
 
             if reason_option:
                 try:
                     option = bytes.fromhex(reason_option)
                 except Exception:
-                    option = reason_obj._bytes()
+                    option = TELEGRAM_OPTION_MAP.get(reason, b"9")
             else:
-                option = reason_obj._bytes()
+                option = TELEGRAM_OPTION_MAP.get(reason, b"9")
 
             # Send the selected option and follow Telegram's real continuation
             # response (another option page or a comment request).
@@ -540,7 +536,7 @@ class ReportEngine:
                     if isinstance(result, types.ReportResultReported):
                         return True
                     if isinstance(result, types.ReportResultAddComment):
-                        follow_up = await client(ReportRequest(
+                        await client(ReportRequest(
                             peer=entity,
                             id=[message_id],
                             option=result.option,
@@ -554,7 +550,7 @@ class ReportEngine:
                         if opts:
                             for opt in opts:
                                 opt_text = (getattr(opt, "text", "") or "").lower()
-                                if reason.lower() in opt_text:
+                                if reason.lower() in opt_text or (reason == "child_abuse" and "child" in opt_text) or (reason in ("fake", "scam") and ("scam" in opt_text or "impersonat" in opt_text)) or (reason == "illegal_drugs" and ("drug" in opt_text or "good" in opt_text)) or (reason == "pornography" and ("porn" in opt_text or "adult" in opt_text)):
                                     chosen_opt = opt.option
                                     break
                             if not chosen_opt:
@@ -582,19 +578,65 @@ class ReportEngine:
                         return False
                     await asyncio.sleep(fe.seconds)
                 except Exception as e:
-                    # Fallback to Channel/Message ReportSpamRequest
+                    # If option was rejected, query Telegram for live options and pick matching
                     try:
-                        from telethon.tl.functions.channels import ReportSpamRequest as ChanReportSpam
-                        await client(ChanReportSpam(channel=entity, participant=entity, id=[message_id]))
-                        return True
+                        fresh = await client(ReportRequest(
+                            peer=entity,
+                            id=[message_id],
+                            option=b"",
+                            message=""
+                        ))
+                        if isinstance(fresh, types.ReportResultChooseOption):
+                            opts = getattr(fresh, "options", []) or []
+                            matched = None
+                            for opt in opts:
+                                o_txt = (getattr(opt, "text", "") or "").lower()
+                                if reason.lower() in o_txt or (reason == "fake" and "scam" in o_txt) or (reason == "child_abuse" and "child" in o_txt) or (reason == "illegal_drugs" and ("drug" in o_txt or "good" in o_txt)) or (reason == "pornography" and ("adult" in o_txt or "porn" in o_txt)):
+                                    matched = opt.option
+                                    break
+                            if not matched and opts:
+                                matched = opts[0].option
+                            if matched:
+                                res2 = await client(ReportRequest(
+                                    peer=entity,
+                                    id=[message_id],
+                                    option=matched,
+                                    message=comment or ''
+                                ))
+                                if isinstance(res2, types.ReportResultAddComment):
+                                    await client(ReportRequest(
+                                        peer=entity,
+                                        id=[message_id],
+                                        option=res2.option,
+                                        message=comment or 'Terms of service violation'
+                                    ))
+                                elif isinstance(res2, types.ReportResultChooseOption):
+                                    sub_opts = getattr(res2, "options", []) or []
+                                    if sub_opts:
+                                        res3 = await client(ReportRequest(
+                                            peer=entity,
+                                            id=[message_id],
+                                            option=sub_opts[0].option,
+                                            message=comment or ''
+                                        ))
+                                        if isinstance(res3, types.ReportResultAddComment):
+                                            await client(ReportRequest(
+                                                peer=entity,
+                                                id=[message_id],
+                                                option=res3.option,
+                                                message=comment or ''
+                                            ))
+                                return True
                     except Exception:
                         pass
-                    try:
-                        from telethon.tl.functions.messages import ReportSpamRequest as MsgReportSpam
-                        await client(MsgReportSpam(peer=entity))
-                        return True
-                    except Exception:
-                        pass
+                    # Only fallback to spam request if reason was spam
+                    if reason == "spam":
+                        try:
+                            from telethon.tl.functions.channels import ReportSpamRequest as ChanReportSpam
+                            await client(ChanReportSpam(channel=entity, participant=entity, id=[message_id]))
+                            return True
+                        except Exception:
+                            pass
                     log_activity(f"Report execution error: {str(e)}")
                     return False
             return False

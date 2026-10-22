@@ -39,11 +39,22 @@ def reason_key_from_label(label: str, fallback: str = "other") -> str:
     aliases = {
         "fake account": "fake",
         "scam": "fake",
+        "scam or fraud": "fake",
         "child abuse": "child_abuse",
+        "violence": "violence",
         "illegal drugs": "illegal_drugs",
+        "illegal goods and services": "illegal_drugs",
+        "illegal adult content": "pornography",
+        "pornography": "pornography",
         "personal details": "personal_details",
+        "personal data": "personal_details",
+        "copyright": "copyright",
+        "spam": "spam",
         "geo irrelevant": "geo_irrelevant",
         "irrelevant / geo": "geo_irrelevant",
+        "it's not illegal, but must be taken down": "geo_irrelevant",
+        "i don't like it": "other",
+        "other": "other",
     }
     return aliases.get(value, fallback)
 

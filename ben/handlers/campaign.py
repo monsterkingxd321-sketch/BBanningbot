@@ -513,6 +513,62 @@ def _reason_prompt_text(data: dict) -> str:
     )
 
 
+# Exact official Telegram options & sub-options verified from Telegram servers
+TELEGRAM_OFFICIAL_SUBOPTIONS = {
+    "32": [
+        {"text": "Child sexual abuse", "option": "3231"},
+        {"text": "Child physical abuse", "option": "3232"},
+    ],
+    "33": [
+        {"text": "Terrorism", "option": "3337"},
+        {"text": "Calling for violence", "option": "3335"},
+        {"text": "Extreme violence, dismemberment", "option": "3333"},
+        {"text": "Graphic or disturbing content", "option": "3332"},
+        {"text": "Hate speech or symbols", "option": "3334"},
+        {"text": "Organized crime", "option": "3336"},
+        {"text": "Insults or false information", "option": "3331"},
+        {"text": "Animal abuse", "option": "3338"},
+    ],
+    "34": [
+        {"text": "Drugs", "option": "3432"},
+        {"text": "Weapons", "option": "3431"},
+        {"text": "Counterfeit merchandise", "option": "3436"},
+        {"text": "Counterfeit money", "option": "3434"},
+        {"text": "Fake documents", "option": "3433"},
+        {"text": "Hacking tools and malware", "option": "3435"},
+        {"text": "Other goods and services", "option": "3437"},
+    ],
+    "35": [
+        {"text": "Pornography", "option": "3537"},
+        {"text": "Non-consensual sexual imagery", "option": "3533"},
+        {"text": "Illegal sexual services", "option": "3532"},
+        {"text": "Child abuse", "option": "3536"},
+        {"text": "Other illegal sexual content", "option": "3534"},
+    ],
+    "37": [
+        {"text": "Impersonation", "option": "3731"},
+        {"text": "Deceptive or unrealistic financial claims", "option": "3732"},
+        {"text": "Malware, phishing", "option": "3733"},
+        {"text": "Fraudulent seller, product or service", "option": "3734"},
+    ],
+    "36": [
+        {"text": "Private images", "option": "3631"},
+        {"text": "Phone number", "option": "3632"},
+        {"text": "Address", "option": "3633"},
+        {"text": "Stolen data or credentials", "option": "3634"},
+        {"text": "Other personal information", "option": "3635"},
+    ],
+    "39": [
+        {"text": "Promoting illegal content", "option": "3931"},
+        {"text": "Promoting other content", "option": "3932"},
+        {"text": "Insults or false information", "option": "3933"},
+    ],
+    "61": [
+        {"text": "False information or defamation", "option": "6131"},
+        {"text": "Something else", "option": "6132"},
+    ],
+}
+
 MAX_REASON_CHOICES = 10
 
 
@@ -661,14 +717,15 @@ async def show_reason_prompt(event, data: dict):
         return
 
     standard_options = [
-        {"text": "Spam", "option": ""},
-        {"text": "Fake Account / Scam", "option": ""},
-        {"text": "Violence", "option": ""},
-        {"text": "Pornography", "option": ""},
-        {"text": "Child Abuse", "option": ""},
-        {"text": "Illegal Drugs", "option": ""},
-        {"text": "Personal Details", "option": ""},
-        {"text": "Copyright", "option": ""},
+        {"text": "Spam", "option": "39"},
+        {"text": "Scam or fraud", "option": "37"},
+        {"text": "Violence", "option": "33"},
+        {"text": "Child abuse", "option": "32"},
+        {"text": "Illegal goods and services", "option": "34"},
+        {"text": "Illegal adult content", "option": "35"},
+        {"text": "Personal data", "option": "36"},
+        {"text": "Copyright", "option": "38"},
+        {"text": "Other", "option": "61"},
     ]
     data["reason_pages"] = [standard_options]
     data["reason_page"] = 0
@@ -773,6 +830,17 @@ async def load_reason_next_page(event, data: dict, selected_option: str,
         data["step"] = "reason_choices"
         _save_flow(event.sender_id, data)
         await show_reason_choices(event, data)
+        return
+
+    official_sub = TELEGRAM_OFFICIAL_SUBOPTIONS.get(selected_option)
+    if official_sub:
+        pages = data.get("reason_pages") or []
+        data["reason_pages"] = pages[:1] + [official_sub]
+        data["reason_page"] = 1
+        data["reason_option"] = ""
+        data["comment_required"] = False
+        _save_flow(event.sender_id, data)
+        await show_stored_reason_page(event, data)
         return
 
     error = result.get("error") or "Telegram did not return the next options."
@@ -1208,22 +1276,24 @@ async def show_account_reason_picker(event, campaign_id: int, phone: str):
         return
     reasons_list = [
         ("spam", "Spam"),
-        ("fake", "Fake Account / Scam"),
+        ("fake", "Scam or Fraud"),
         ("violence", "Violence"),
-        ("pornography", "Pornography"),
         ("child_abuse", "Child Abuse"),
-        ("illegal_drugs", "Illegal Drugs"),
-        ("personal_details", "Personal Details"),
+        ("illegal_drugs", "Illegal Goods & Services"),
+        ("pornography", "Illegal Adult Content"),
+        ("personal_details", "Personal Data"),
         ("copyright", "Copyright"),
+        ("other", "Other"),
     ]
     text = (
         f"**Select Report Reason for {mask_phone(phone)}**\n\n"
-        "Choose which reason this specific account will send when reporting:"
+        "Choose which official Telegram reason this account will report.\n"
+        "Tap a reason to pick its exact sub-options or general type:"
     )
     buttons = []
     row = []
     for key, label in reasons_list:
-        row.append(Button.inline(label, f"cmp:ed_ar_rsn_pick:{campaign_id}:{phone}:{key}".encode()))
+        row.append(Button.inline(label, f"cmp:ed_ar_rsn_menu:{campaign_id}:{phone}:{key}".encode()))
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -1231,6 +1301,45 @@ async def show_account_reason_picker(event, campaign_id: int, phone: str):
         buttons.append(row)
     buttons.append([Button.inline("Use Campaign Default Reasons", f"cmp:ed_ar_rsn_def:{campaign_id}:{phone}".encode())])
     buttons.append([Button.inline("Back", f"cmp:ed_ar_acc:{campaign_id}:{phone}".encode())])
+    await _render(event, text, buttons=buttons)
+
+
+async def show_account_subreason_picker(event, campaign_id: int, phone: str, r_key: str):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.")
+        return
+    code_map = {
+        "spam": ("Spam", "39"),
+        "fake": ("Scam or Fraud", "37"),
+        "violence": ("Violence", "33"),
+        "child_abuse": ("Child Abuse", "32"),
+        "illegal_drugs": ("Illegal Goods & Services", "34"),
+        "pornography": ("Illegal Adult Content", "35"),
+        "personal_details": ("Personal Data", "36"),
+        "copyright": ("Copyright", "38"),
+        "other": ("Other", "61"),
+    }
+    r_name, r_code = code_map.get(r_key, ("Other", "61"))
+    subs = TELEGRAM_OFFICIAL_SUBOPTIONS.get(r_code, [])
+
+    text = (
+        f"**Select Sub-Option for {r_name} ({mask_phone(phone)})**\n\n"
+        "Choose the exact official Telegram sub-option for this account:"
+    )
+    buttons = []
+    buttons.append([Button.inline(f"General {r_name} (Main)", f"cmp:ed_ar_rsn_pick:{campaign_id}:{phone}:{r_key}:{r_code}".encode())])
+    row = []
+    for idx, sub in enumerate(subs):
+        label = sub.get("text", "")
+        opt_hex = sub.get("option", "")
+        row.append(Button.inline(label[:24], f"cmp:ed_ar_rsn_sub:{campaign_id}:{phone}:{r_key}:{opt_hex}:{idx}".encode()))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([Button.inline("Back to Main Reasons", f"cmp:ed_ar_rsn:{campaign_id}:{phone}".encode())])
     await _render(event, text, buttons=buttons)
 
 
@@ -2112,23 +2221,55 @@ async def handle_campaign_callback(event, data: str):
                     db.update_report_campaign(cid, account_rules=rules)
             await show_account_rule_editor(event, cid, phone)
             return
+        if action == "ed_ar_rsn_menu" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            r_key = parts[4] if len(parts) > 4 else "spam"
+            await show_account_subreason_picker(event, cid, phone, r_key)
+            return
+        if action == "ed_ar_rsn_sub" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            r_key = parts[4] if len(parts) > 4 else "spam"
+            opt_hex = parts[5] if len(parts) > 5 else ""
+            sub_idx = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0
+            code_map = {
+                "spam": "39", "fake": "37", "violence": "33", "child_abuse": "32",
+                "illegal_drugs": "34", "pornography": "35", "personal_details": "36",
+                "copyright": "38", "other": "61"
+            }
+            main_code = code_map.get(r_key, "61")
+            subs = TELEGRAM_OFFICIAL_SUBOPTIONS.get(main_code, [])
+            sub_text = subs[sub_idx].get("text", r_key) if 0 <= sub_idx < len(subs) else r_key
+            campaign = db.get_report_campaign(cid)
+            if campaign:
+                reason_obj = {"reason": r_key, "detail": sub_text, "option": opt_hex}
+                rules = dict(campaign.get("account_rules") or {})
+                rule = dict(rules.get(phone) or {})
+                rule["reasons"] = [reason_obj]
+                rules[phone] = rule
+                db.update_report_campaign(cid, account_rules=rules)
+            await show_account_rule_editor(event, cid, phone)
+            return
         if action == "ed_ar_rsn_pick" and arg:
             cid = int(arg)
             phone = parts[3] if len(parts) > 3 else ""
             r_key = parts[4] if len(parts) > 4 else "spam"
+            opt_hex = parts[5] if len(parts) > 5 else ""
+            labels = {
+                "spam": "Spam",
+                "fake": "Scam or Fraud",
+                "violence": "Violence",
+                "pornography": "Illegal Adult Content",
+                "child_abuse": "Child Abuse",
+                "illegal_drugs": "Illegal Goods & Services",
+                "personal_details": "Personal Data",
+                "copyright": "Copyright",
+                "other": "Other",
+            }
             campaign = db.get_report_campaign(cid)
             if campaign:
-                labels = {
-                    "spam": "Spam",
-                    "fake": "Fake Account / Scam",
-                    "violence": "Violence",
-                    "pornography": "Pornography",
-                    "child_abuse": "Child Abuse",
-                    "illegal_drugs": "Illegal Drugs",
-                    "personal_details": "Personal Details",
-                    "copyright": "Copyright",
-                }
-                reason_obj = {"reason": r_key, "detail": labels.get(r_key, r_key), "option": ""}
+                reason_obj = {"reason": r_key, "detail": labels.get(r_key, r_key), "option": opt_hex}
                 rules = dict(campaign.get("account_rules") or {})
                 rule = dict(rules.get(phone) or {})
                 rule["reasons"] = [reason_obj]

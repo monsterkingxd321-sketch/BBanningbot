@@ -39,66 +39,75 @@ async def load_report_choices(phone: str, target: str, message_link: str,
     accounts = db.get_active_accounts()
     if not accounts:
         return {"kind": "error", "error": "No active account is available."}
-    account = None
-    if phone:
-        account = next((row for row in accounts if row[1] == phone), None)
-    if account is None:
-        account = accounts[0]
 
-    _, account_phone, session_file, _, proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass = account
-    client = None
-    try:
-        proxy = get_telethon_proxy(
-            proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass
-        )
-        client = TelegramClient(
-            session_file.replace(".session", ""), API_ID, API_HASH, proxy=proxy
-        )
-        await client.connect()
-        if not await client.is_user_authorized():
+    candidates = []
+    if phone:
+        chosen = next((row for row in accounts if row[1] == phone), None)
+        if chosen:
+            candidates.append(chosen)
+    candidates.extend([row for row in accounts if row not in candidates])
+
+    last_error = "No active account is available."
+    for account in candidates:
+        _, account_phone, session_file, _, proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass = account
+        client = None
+        try:
+            proxy = get_telethon_proxy(
+                proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass
+            )
+            client = TelegramClient(
+                session_file.replace(".session", ""), API_ID, API_HASH, proxy=proxy
+            )
+            await client.connect()
+            if not await client.is_user_authorized():
+                last_error = f"Account {account_phone} is not authorized."
+                continue
+
+            chat_ref, message_id = parse_message_link(message_link)
+            try:
+                entity = await client.get_entity(chat_ref)
+            except Exception:
+                try:
+                    entity = await client.get_entity(target)
+                except Exception as ent_err:
+                    last_error = redact_sensitive(ent_err, 300)
+                    continue
+
+            result = await client(ReportRequest(
+                peer=entity,
+                id=[message_id],
+                option=option_bytes or b"",
+                message=message or "",
+            ))
+
+            if isinstance(result, types.ReportResultChooseOption):
+                return {
+                    "kind": "choose",
+                    "title": str(getattr(result, "title", "") or ""),
+                    "options": _option_rows(result),
+                    "phone": account_phone,
+                }
+            if isinstance(result, types.ReportResultAddComment):
+                return {
+                    "kind": "comment",
+                    "optional": bool(getattr(result, "optional", False)),
+                    "option": _option_hex(getattr(result, "option", b"")),
+                    "phone": account_phone,
+                }
+            if isinstance(result, types.ReportResultReported):
+                return {"kind": "reported", "phone": account_phone}
             return {
                 "kind": "error",
-                "error": "The selected account is not authorized. Log in again.",
+                "error": "Telegram returned an unsupported report response.",
             }
+        except Exception as exc:
+            last_error = redact_sensitive(exc, 300)
+            continue
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
-        chat_ref, message_id = parse_message_link(message_link)
-        try:
-            entity = await client.get_entity(chat_ref)
-        except Exception:
-            entity = await client.get_entity(target)
-
-        result = await client(ReportRequest(
-            peer=entity,
-            id=[message_id],
-            option=option_bytes or b"",
-            message=message or "",
-        ))
-
-        if isinstance(result, types.ReportResultChooseOption):
-            return {
-                "kind": "choose",
-                "title": str(getattr(result, "title", "") or ""),
-                "options": _option_rows(result),
-                "phone": account_phone,
-            }
-        if isinstance(result, types.ReportResultAddComment):
-            return {
-                "kind": "comment",
-                "optional": bool(getattr(result, "optional", False)),
-                "option": _option_hex(getattr(result, "option", b"")),
-                "phone": account_phone,
-            }
-        if isinstance(result, types.ReportResultReported):
-            return {"kind": "reported", "phone": account_phone}
-        return {
-            "kind": "error",
-            "error": "Telegram returned an unsupported report response.",
-        }
-    except Exception as exc:
-        return {"kind": "error", "error": redact_sensitive(exc, 300)}
-    finally:
-        if client is not None:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+    return {"kind": "error", "error": last_error}

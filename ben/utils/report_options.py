@@ -9,7 +9,7 @@ from telethon import TelegramClient, types
 from telethon.tl.functions.messages import ReportRequest
 
 from config import API_ID, API_HASH
-from utils.helpers import get_telethon_proxy, parse_message_link
+from utils.helpers import get_telethon_proxy, parse_message_link, resolve_session_path
 from utils.review_utils import redact_sensitive
 
 
@@ -50,13 +50,18 @@ async def load_report_choices(phone: str, target: str, message_link: str,
     last_error = "No active account is available."
     for account in candidates:
         _, account_phone, session_file, _, proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass = account
+        session_path = resolve_session_path(session_file, account_phone)
+        if not session_path:
+            last_error = f"Session file missing for {account_phone}."
+            continue
         client = None
         try:
             proxy = get_telethon_proxy(
                 proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass
             )
+            base_session = session_path[:-8] if session_path.lower().endswith(".session") else session_path
             client = TelegramClient(
-                session_file.replace(".session", ""), API_ID, API_HASH, proxy=proxy
+                base_session, API_ID, API_HASH, proxy=proxy
             )
             await client.connect()
             if not await client.is_user_authorized():

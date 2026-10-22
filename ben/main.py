@@ -29,6 +29,8 @@ from config import (
     CAMPAIGN_DEFAULT_INTERVAL_HOURS,
     CAMPAIGN_DEFAULT_DURATION_HOURS,
     CAMPAIGN_DEFAULT_REPORTS_PER_MESSAGE,
+    BOT_TIMEZONE_NAME,
+    get_now,
 )
 from utils.helpers import log_activity
 
@@ -129,6 +131,7 @@ async def main():
         f"every {CAMPAIGN_DEFAULT_INTERVAL_HOURS:g}h, "
         f"{CAMPAIGN_DEFAULT_DURATION_HOURS:g}h total duration"
     )
+    print(f"Timezone: {BOT_TIMEZONE_NAME} (Current time: {get_now().strftime('%Y-%m-%d %H:%M:%S')})")
     
     log_activity("Bot started")
 

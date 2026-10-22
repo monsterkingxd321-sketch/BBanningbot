@@ -81,6 +81,45 @@ async def set_account_online(client: TelegramClient, offline: bool = False):
     except Exception:
         pass
 
+def resolve_session_path(session_file: str, phone: str = None) -> Optional[str]:
+    """Resolve the actual path to the .session file across platforms (Windows / Linux / Docker / Cloud).
+    Handles cases where the database stored an absolute path from another OS (e.g. F:\\... on Linux or /app/... on Windows).
+    If local session is missing, attempts to restore it from MongoDB Atlas if session_data is available.
+    Returns the valid filepath or None.
+    """
+    if session_file and os.path.isfile(session_file):
+        return session_file
+
+    clean_phone = (phone or "").replace("+", "").strip()
+
+    if session_file:
+        fname = os.path.basename(session_file.replace("\\", "/"))
+        candidate = os.path.join(SESSIONS_FOLDER, fname)
+        if os.path.isfile(candidate):
+            return candidate
+
+    if clean_phone:
+        candidate = os.path.join(SESSIONS_FOLDER, f"account_{clean_phone}.session")
+        if os.path.isfile(candidate):
+            return candidate
+
+    # Try restoring from MongoDB Atlas if available
+    try:
+        if db and getattr(db, "mongo_db", None) is not None and phone:
+            mongo_acc = db.mongo_db.accounts.find_one({"phone": phone})
+            if mongo_acc and mongo_acc.get("session_data"):
+                import base64
+                os.makedirs(SESSIONS_FOLDER, exist_ok=True)
+                dest = os.path.join(SESSIONS_FOLDER, f"account_{clean_phone}.session")
+                with open(dest, "wb") as sf:
+                    sf.write(base64.b64decode(mongo_acc["session_data"]))
+                if os.path.isfile(dest):
+                    return dest
+    except Exception as exc:
+        log_activity(f"Failed to restore session for {phone} from MongoDB: {exc}")
+
+    return None
+
 def parse_message_link(message_link: str) -> tuple:
     """Return ``(chat_reference, message_id)`` for a Telegram message link.
 
@@ -249,14 +288,16 @@ async def join_accounts_to_target(target: str, progress_message=None, accounts: 
         ok = False
         message = ""
         try:
-            if not session_file or not os.path.isfile(session_file):
+            session_path = resolve_session_path(session_file, phone)
+            if not session_path:
                 message = "session file is missing"
             else:
                 proxy_tuple = get_telethon_proxy(
                     proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass
                 )
+                base_session = session_path[:-8] if session_path.lower().endswith('.session') else session_path
                 client = TelegramClient(
-                    session_file.replace('.session', ''), API_ID, API_HASH, proxy=proxy_tuple
+                    base_session, API_ID, API_HASH, proxy=proxy_tuple
                 )
                 await client.connect()
                 if not await client.is_user_authorized():
@@ -400,72 +441,87 @@ async def scrape_recent_messages(target: str, limit: int = 10, phone: str = None
     active_accounts = db.get_active_accounts()
     if not active_accounts:
         raise Exception("No active accounts available to scrape target!")
-    
-    # Use the requested account, or the first active account.
+
+    accounts_to_try = []
     if phone:
         matching = [acc for acc in active_accounts if acc[1] == phone]
         if not matching:
-            raise Exception("Selected account is not active or was not found.")
-        account = matching[0]
+            raise Exception(f"Selected account {mask_phone(phone)} is not active or was not found.")
+        accounts_to_try = matching
     else:
-        account = active_accounts[0]
-    session_file = account[2]
-    proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass = account[4], account[5], account[6], account[7], account[8]
-    
-    proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
-    client = TelegramClient(session_file.replace('.session', ''), API_ID, API_HASH, proxy=proxy_tuple)
-    
-    await client.connect()
-    
-    try:
-        kind, value = parse_target_identifier(target)
-        entity = None
+        accounts_to_try = list(active_accounts)
 
-        if kind == "invite":
-            from telethon.tl.functions.messages import CheckChatInviteRequest
-            try:
-                invite_result = await client(ImportChatInviteRequest(value))
-                entity = invite_result.chats[0]
-            except tg_errors.UserAlreadyParticipantError:
-                check = await client(CheckChatInviteRequest(value))
-                entity = getattr(check, 'chat', None)
-                if entity is None:
-                    raise Exception("Invite is valid but the account is not a member yet.")
-        else:
-            joined, join_message = await ensure_account_joined(client, target)
-            if not joined:
-                raise Exception(join_message)
-            entity = await client.get_entity(value)
+    last_error = None
+    for account in accounts_to_try:
+        acc_phone = account[1]
+        session_file = account[2]
+        proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass = account[4], account[5], account[6], account[7], account[8]
 
-        # Scrape only real channel posts. Telegram also returns service
-        # messages (channel created, photo changed, pinned, joins, etc.) in the
-        # same history. Those are not reportable posts and must not inflate the
-        # link count. Iterate until the requested number of real posts is
-        # collected instead of stopping after that many raw history entries.
-        messages = []
-        grouped_seen = set()
-        async for msg in client.iter_messages(entity):
-            if len(messages) >= limit:
-                break
-            # Multi-photo/video albums are one visible post but contain several
-            # message IDs. Count the album once instead of inflating the post
-            # count shown to the user.
-            if not is_reportable_post(msg, grouped_seen):
+        session_path = resolve_session_path(session_file, acc_phone)
+        if not session_path:
+            last_error = Exception(f"Session file for account {mask_phone(acc_phone)} is missing.")
+            continue
+
+        proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
+        base_session = session_path[:-8] if session_path.lower().endswith('.session') else session_path
+        client = TelegramClient(base_session, API_ID, API_HASH, proxy=proxy_tuple)
+
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                last_error = Exception(f"Account {mask_phone(acc_phone)} session is unauthorized or revoked.")
                 continue
-            if getattr(entity, 'username', None):
-                link = f"https://t.me/{entity.username}/{msg.id}"
-            else:
-                raw_id = str(entity.id)
-                if raw_id.startswith("-100"):
-                    raw_id = raw_id[4:]
-                elif raw_id.startswith("-"):
-                    raw_id = raw_id[1:]
-                link = f"https://t.me/c/{raw_id}/{msg.id}"
-            messages.append(link)
 
-        return messages
-    finally:
-        await client.disconnect()
+            kind, value = parse_target_identifier(target)
+            entity = None
+
+            if kind == "invite":
+                from telethon.tl.functions.messages import CheckChatInviteRequest
+                try:
+                    invite_result = await client(ImportChatInviteRequest(value))
+                    entity = invite_result.chats[0]
+                except tg_errors.UserAlreadyParticipantError:
+                    check = await client(CheckChatInviteRequest(value))
+                    entity = getattr(check, 'chat', None)
+                    if entity is None:
+                        raise Exception("Invite is valid but the account is not a member yet.")
+            else:
+                joined, join_message = await ensure_account_joined(client, target)
+                if not joined:
+                    raise Exception(join_message)
+                entity = await client.get_entity(value)
+
+            messages = []
+            grouped_seen = set()
+            async for msg in client.iter_messages(entity):
+                if len(messages) >= limit:
+                    break
+                if not is_reportable_post(msg, grouped_seen):
+                    continue
+                if getattr(entity, 'username', None):
+                    link = f"https://t.me/{entity.username}/{msg.id}"
+                else:
+                    raw_id = str(entity.id)
+                    if raw_id.startswith("-100"):
+                        raw_id = raw_id[4:]
+                    elif raw_id.startswith("-"):
+                        raw_id = raw_id[1:]
+                    link = f"https://t.me/c/{raw_id}/{msg.id}"
+                messages.append(link)
+
+            return messages
+        except Exception as exc:
+            last_error = exc
+            log_activity(f"Scrape attempt with {mask_phone(acc_phone)} failed: {exc}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+    if last_error:
+        raise last_error
+    raise Exception("No active account was able to fetch messages.")
 
 class ReportEngine:
     def __init__(self, user_id: int):
@@ -753,8 +809,13 @@ class ReportEngine:
             client = None
 
             try:
+                session_path = resolve_session_path(session_file, phone)
+                if not session_path:
+                    log_activity(f"Session file missing for {mask_phone(phone)}; skipping")
+                    continue
                 proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
-                client = TelegramClient(session_file.replace('.session', ''), API_ID, API_HASH, proxy=proxy_tuple)
+                base_session = session_path[:-8] if session_path.lower().endswith('.session') else session_path
+                client = TelegramClient(base_session, API_ID, API_HASH, proxy=proxy_tuple)
                 await client.connect()
                 # Set account status to ONLINE
                 await set_account_online(client, offline=False)
@@ -995,8 +1056,13 @@ class ReportEngine:
 
             client = None
             try:
+                session_path = resolve_session_path(session_file, phone)
+                if not session_path:
+                    log_activity(f"[Worker {mask_phone(phone)}] Session file missing; skipping")
+                    return
                 proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
-                client = TelegramClient(session_file.replace('.session', ''), API_ID, API_HASH, proxy=proxy_tuple)
+                base_session = session_path[:-8] if session_path.lower().endswith('.session') else session_path
+                client = TelegramClient(base_session, API_ID, API_HASH, proxy=proxy_tuple)
                 await client.connect()
                 # Set account status to ONLINE
                 await set_account_online(client, offline=False)
@@ -1173,8 +1239,13 @@ class ReportEngine:
             account_id, phone, session_file, status, proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass = account
             
             try:
+                session_path = resolve_session_path(session_file, phone)
+                if not session_path:
+                    log_activity(f"Session file missing for {mask_phone(phone)}; skipping")
+                    continue
                 proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
-                client = TelegramClient(session_file.replace('.session', ''), API_ID, API_HASH, proxy=proxy_tuple)
+                base_session = session_path[:-8] if session_path.lower().endswith('.session') else session_path
+                client = TelegramClient(base_session, API_ID, API_HASH, proxy=proxy_tuple)
                 await client.connect()
                 await set_account_online(client, offline=False)
                 
@@ -1286,8 +1357,13 @@ class ReportEngine:
                 return
                 
             try:
+                session_path = resolve_session_path(session_file, phone)
+                if not session_path:
+                    log_activity(f"[PeerWorker {mask_phone(phone)}] Session file missing; skipping")
+                    return
                 proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
-                client = TelegramClient(session_file.replace('.session', ''), API_ID, API_HASH, proxy=proxy_tuple)
+                base_session = session_path[:-8] if session_path.lower().endswith('.session') else session_path
+                client = TelegramClient(base_session, API_ID, API_HASH, proxy=proxy_tuple)
                 await client.connect()
                 await set_account_online(client, offline=False)
                 

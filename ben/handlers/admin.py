@@ -1,6 +1,6 @@
 from telethon import events, Button
 from bot import bot, db, active_reports
-from utils.helpers import is_user_authorized, log_activity
+from utils.helpers import is_user_authorized, log_activity, resolve_session_path
 
 
 def _stats_text() -> str:
@@ -327,18 +327,25 @@ async def check_command(event):
         err_msg = ""
 
         try:
-            proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
-            client = TelegramClient(session_file.replace('.session', ''), API_ID, API_HASH, proxy=proxy_tuple)
-            await client.connect()
-
-            if await client.is_user_authorized():
-                conn_ok = True
-                db.update_account_status(phone, "active")
+            session_path = resolve_session_path(session_file, phone)
+            if not session_path:
+                conn_ok = False
+                err_msg = "Session file missing"
+                db.update_account_status(phone, "error", True)
             else:
-                db.update_account_status(phone, "banned")
-                err_msg = "Not authorized (banned or session expired)"
+                proxy_tuple = get_telethon_proxy(proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass)
+                base_session = session_path[:-8] if session_path.lower().endswith('.session') else session_path
+                client = TelegramClient(base_session, API_ID, API_HASH, proxy=proxy_tuple)
+                await client.connect()
 
-            await client.disconnect()
+                if await client.is_user_authorized():
+                    conn_ok = True
+                    db.update_account_status(phone, "active")
+                else:
+                    db.update_account_status(phone, "banned")
+                    err_msg = "Not authorized (banned or session expired)"
+
+                await client.disconnect()
         except Exception as e:
             err_msg = str(e)
             db.update_account_status(phone, "error", True)

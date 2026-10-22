@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 from bot import active_campaigns
-from config import CAMPAIGN_TICK_SECONDS
+from config import CAMPAIGN_TICK_SECONDS, get_now
 from utils.helpers import ReportEngine, log_activity
 from utils.review_utils import format_dt, parse_iso, redact_sensitive
 
@@ -52,6 +52,11 @@ class CampaignScheduler:
                 break
 
     async def tick(self):
+        if hasattr(self.db, "sync_campaigns_from_mongo"):
+            try:
+                self.db.sync_campaigns_from_mongo()
+            except Exception as exc:
+                log_activity(f"Campaign scheduler Mongo sync error: {redact_sensitive(exc, 200)}")
         expired = self.db.expire_report_campaigns()
         if expired:
             log_activity(f"Campaign scheduler completed {expired} campaign(s) at their deadline")
@@ -76,7 +81,7 @@ class CampaignScheduler:
 
             current = self.db.get_report_campaign(campaign_id)
             deadline = parse_iso((current or campaign).get("ends_at"))
-            if deadline and deadline <= datetime.now():
+            if deadline and deadline <= get_now():
                 self.db.update_report_campaign(
                     campaign_id,
                     status="completed",
@@ -166,7 +171,7 @@ class CampaignScheduler:
             result = result or {}
 
             fresh = self.db.get_report_campaign(campaign_id) or campaign
-            now = datetime.now()
+            now = get_now()
             deadline = parse_iso(fresh.get("ends_at"))
             duration_reached = bool(deadline and deadline <= now)
             cycle_count = int(fresh.get("cycle_count") or 0) + 1

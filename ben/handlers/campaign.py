@@ -17,6 +17,7 @@ from config import (
     CAMPAIGN_DEFAULT_INTERVAL_HOURS,
     CAMPAIGN_DEFAULT_REPORTS_PER_MESSAGE,
     CAMPAIGN_MAX_POSTS,
+    get_now,
 )
 from utils.helpers import log_activity, mask_phone, scrape_recent_messages
 from utils.report_options import load_report_choices
@@ -1704,7 +1705,7 @@ async def _start_campaign(event, campaign_id: int, reset_cycles: bool = False):
         ]
         db.update_report_campaign(campaign_id, reason_choices=choices)
 
-    now = datetime.now()
+    now = get_now()
     ends_at = campaign.get("ends_at")
     if reset_cycles or not ends_at:
         duration_hours = float(campaign.get("duration_hours") or 0)

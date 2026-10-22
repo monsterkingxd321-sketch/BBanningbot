@@ -1,9 +1,10 @@
 import os
 import json
+import base64
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from config import DATABASE_FILE, DEFAULT_ADMINS
+from config import DATABASE_FILE, DEFAULT_ADMINS, SESSIONS_FOLDER, get_now
 
 def db_write_lock(func):
     def wrapper(self, *args, **kwargs):
@@ -12,12 +13,23 @@ def db_write_lock(func):
     return wrapper
 
 
+def _to_json_str(val, default):
+    if val is None:
+        return json.dumps(default)
+    if isinstance(val, str):
+        return val
+    try:
+        return json.dumps(val)
+    except Exception:
+        return json.dumps(default)
+
+
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return get_now().isoformat(timespec="seconds")
 
 
 def _iso_after(hours: float) -> str:
-    return (datetime.now() + timedelta(hours=float(hours))).isoformat(timespec="seconds")
+    return (get_now() + timedelta(hours=float(hours))).isoformat(timespec="seconds")
 
 
 class Database:
@@ -26,9 +38,11 @@ class Database:
         self._lock = threading.Lock()
         self.mongo_client = None
         self.mongo_db = None
-        self._init_mongo()
+        if self.db_file == DATABASE_FILE:
+            self._init_mongo()
         self.init_db()
-        self._sync_with_mongo()
+        if self.db_file == DATABASE_FILE:
+            self._sync_with_mongo()
 
     def _init_mongo(self):
         try:
@@ -50,21 +64,21 @@ class Database:
             self.mongo_db = None
 
     def _mongo_set(self, collection_name: str, filter_doc: dict, set_doc: dict, upsert: bool = True):
-        if self.mongo_db is not None:
+        if self.mongo_db is not None and self.db_file == DATABASE_FILE:
             try:
                 self.mongo_db[collection_name].update_one(filter_doc, {"$set": set_doc}, upsert=upsert)
             except Exception as e:
                 print(f"[MongoDB] Error writing to {collection_name}: {e}")
 
     def _mongo_delete(self, collection_name: str, filter_doc: dict):
-        if self.mongo_db is not None:
+        if self.mongo_db is not None and self.db_file == DATABASE_FILE:
             try:
                 self.mongo_db[collection_name].delete_one(filter_doc)
             except Exception as e:
                 print(f"[MongoDB] Error deleting from {collection_name}: {e}")
 
     def _mongo_insert(self, collection_name: str, doc: dict):
-        if self.mongo_db is not None:
+        if self.mongo_db is not None and self.db_file == DATABASE_FILE:
             try:
                 self.mongo_db[collection_name].insert_one(dict(doc))
             except Exception as e:
@@ -114,6 +128,31 @@ class Database:
             mongo_accounts = list(self.mongo_db.accounts.find({}, {"_id": 0}))
             if mongo_accounts:
                 for acc in mongo_accounts:
+                    phone = acc.get("phone")
+                    session_file = acc.get("session_file")
+                    clean_phone = (phone or "").replace("+", "").strip()
+
+                    # Restore .session file from MongoDB if session_data is present
+                    session_data_b64 = acc.get("session_data")
+                    target_session_file = os.path.join(SESSIONS_FOLDER, f"account_{clean_phone}.session")
+                    if session_data_b64:
+                        try:
+                            os.makedirs(SESSIONS_FOLDER, exist_ok=True)
+                            raw_bytes = base64.b64decode(session_data_b64)
+                            with open(target_session_file, "wb") as sf:
+                                sf.write(raw_bytes)
+                            session_file = target_session_file
+                        except Exception as e:
+                            print(f"[MongoDB] Error restoring session file for {phone}: {e}")
+                    elif session_file and not os.path.isfile(session_file):
+                        # Try finding in SESSIONS_FOLDER
+                        fname = os.path.basename(session_file.replace("\\", "/"))
+                        local_path = os.path.join(SESSIONS_FOLDER, fname)
+                        if os.path.isfile(local_path):
+                            session_file = local_path
+                        elif clean_phone and os.path.isfile(target_session_file):
+                            session_file = target_session_file
+
                     cursor.execute('''
                         INSERT OR REPLACE INTO accounts (
                             id, phone, session_file, status, added_date, last_used, added_by,
@@ -121,7 +160,7 @@ class Database:
                             enabled, session_user_id, label, last_checked, connection_status, file_hash
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
-                        acc.get("id"), acc.get("phone"), acc.get("session_file"), acc.get("status", "active"),
+                        acc.get("id"), acc.get("phone"), session_file, acc.get("status", "active"),
                         acc.get("added_date"), acc.get("last_used"), acc.get("added_by"),
                         acc.get("is_banned", 0), acc.get("proxy_type"), acc.get("proxy_ip"),
                         acc.get("proxy_port"), acc.get("proxy_user"), acc.get("proxy_pass"),
@@ -143,6 +182,27 @@ class Database:
                     "enabled": row[13], "session_user_id": row[14], "label": row[15],
                     "last_checked": row[16], "connection_status": row[17], "file_hash": row[18]
                 }
+                # If local session file exists, store session_data in MongoDB for multi-platform sync
+                actual_file = doc["session_file"]
+                clean_phone = (doc["phone"] or "").replace("+", "").strip()
+                if not actual_file or not os.path.isfile(actual_file):
+                    fname = os.path.basename((actual_file or "").replace("\\", "/"))
+                    candidate = os.path.join(SESSIONS_FOLDER, fname)
+                    if os.path.isfile(candidate):
+                        actual_file = candidate
+                    else:
+                        candidate2 = os.path.join(SESSIONS_FOLDER, f"account_{clean_phone}.session")
+                        if os.path.isfile(candidate2):
+                            actual_file = candidate2
+
+                if actual_file and os.path.isfile(actual_file):
+                    try:
+                        with open(actual_file, "rb") as sf:
+                            doc["session_data"] = base64.b64encode(sf.read()).decode("ascii")
+                        doc["session_file"] = f"account_{clean_phone}.session"
+                    except Exception:
+                        pass
+
                 self.mongo_db.accounts.update_one({"phone": row[1]}, {"$set": doc}, upsert=True)
 
             # 4. Report Campaigns
@@ -159,14 +219,14 @@ class Database:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         c.get("id"), c.get("name"), c.get("target"),
-                        json.dumps(c.get("account_phones") if isinstance(c.get("account_phones"), list) else []),
-                        json.dumps(c.get("messages") if isinstance(c.get("messages"), list) else []),
+                        _to_json_str(c.get("account_phones"), []),
+                        _to_json_str(c.get("messages"), []),
                         c.get("reports_per_message", 2), c.get("delay_seconds", 5),
                         c.get("exec_mode", "safe"), c.get("dist_mode", "all"),
-                        json.dumps(c.get("account_rules") if isinstance(c.get("account_rules"), dict) else {}),
+                        _to_json_str(c.get("account_rules"), {}),
                         c.get("reason", "spam"), c.get("reason_detail", ""),
                         c.get("reason_option", ""),
-                        json.dumps(c.get("reason_choices") if isinstance(c.get("reason_choices"), list) else []),
+                        _to_json_str(c.get("reason_choices"), []),
                         c.get("comment", ""), c.get("interval_hours", 0), c.get("duration_hours", 0),
                         c.get("max_cycles", 1), c.get("cycle_count", 0), c.get("status", "ready"),
                         c.get("next_run_at"), c.get("ends_at"), c.get("created_by"), c.get("created_at"),
@@ -677,13 +737,20 @@ class Database:
             ''', (phone, session_file, _now(), added_by, proxy_type, proxy_ip, proxy_port, proxy_user, proxy_pass, _now()))
             conn.commit()
             conn.close()
-            self._mongo_set("accounts", {"phone": phone}, {
+            doc = {
                 "phone": phone, "session_file": session_file, "status": "active",
                 "added_date": _now(), "added_by": added_by, "proxy_type": proxy_type,
                 "proxy_ip": proxy_ip, "proxy_port": proxy_port, "proxy_user": proxy_user,
                 "proxy_pass": proxy_pass, "enabled": 1, "last_checked": _now(),
                 "connection_status": "connected (login)", "is_banned": 0
-            })
+            }
+            if session_file and os.path.isfile(session_file):
+                try:
+                    with open(session_file, "rb") as sf:
+                        doc["session_data"] = base64.b64encode(sf.read()).decode("ascii")
+                except Exception:
+                    pass
+            self._mongo_set("accounts", {"phone": phone}, doc)
             return True
         except Exception as e:
             print(f"Error adding account: {e}")
@@ -707,12 +774,19 @@ class Database:
         ''', (phone, session_file, _now(), added_by, session_user_id, file_hash, label, _now()))
         conn.commit()
         conn.close()
-        self._mongo_set("accounts", {"phone": phone}, {
+        doc = {
             "phone": phone, "session_file": session_file, "status": "active",
             "added_date": _now(), "added_by": added_by, "enabled": 1,
             "session_user_id": session_user_id, "file_hash": file_hash, "label": label,
             "last_checked": _now(), "connection_status": "connected (import)", "is_banned": 0
-        })
+        }
+        if session_file and os.path.isfile(session_file):
+            try:
+                with open(session_file, "rb") as sf:
+                    doc["session_data"] = base64.b64encode(sf.read()).decode("ascii")
+            except Exception:
+                pass
+        self._mongo_set("accounts", {"phone": phone}, doc)
         return True
 
     @db_write_lock
@@ -880,7 +954,7 @@ class Database:
     def add_report_stats(self, total: int, success: int, failed: int):
         conn = self.get_connection()
         cursor = conn.cursor()
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = get_now().strftime('%Y-%m-%d')
         cursor.execute(' SELECT id FROM report_stats WHERE date = ?', (today,))
         existing = cursor.fetchone()
 
@@ -911,7 +985,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = get_now().strftime('%Y-%m-%d')
         cursor.execute(' SELECT total_reports, success, failed FROM report_stats WHERE date = ?', (today,))
         today_stats = cursor.fetchone() or (0, 0, 0)
 
@@ -2185,7 +2259,7 @@ class Database:
         cursor = conn.cursor()
         cursor.execute("SELECT id, interval_hours FROM report_campaigns WHERE status = 'running'")
         rows = cursor.fetchall()
-        now = datetime.now()
+        now = get_now()
         for r in rows:
             cid, interval_h = r[0], r[1]
             if interval_h and float(interval_h) > 0:
@@ -2214,3 +2288,43 @@ class Database:
             last_run_at=_now(),
             last_result=last_result,
         )
+
+    @db_write_lock
+    def sync_campaigns_from_mongo(self):
+        """Pull active/ready campaigns from MongoDB into SQLite so scheduler stays up to date."""
+        if self.mongo_db is None or self.db_file != DATABASE_FILE:
+            return
+        try:
+            mongo_campaigns = list(self.mongo_db.report_campaigns.find({}, {"_id": 0}))
+            if not mongo_campaigns:
+                return
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            for c in mongo_campaigns:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO report_campaigns (
+                        id, name, target, account_phones, messages, reports_per_message,
+                        delay_seconds, exec_mode, dist_mode, account_rules, reason, reason_detail, reason_option,
+                        reason_choices, comment, interval_hours, duration_hours, max_cycles,
+                        cycle_count, status, next_run_at, ends_at, created_by, created_at,
+                        last_run_at, last_result
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    c.get("id"), c.get("name"), c.get("target"),
+                    _to_json_str(c.get("account_phones"), []),
+                    _to_json_str(c.get("messages"), []),
+                    c.get("reports_per_message", 2), c.get("delay_seconds", 5),
+                    c.get("exec_mode", "safe"), c.get("dist_mode", "all"),
+                    _to_json_str(c.get("account_rules"), {}),
+                    c.get("reason", "spam"), c.get("reason_detail", ""),
+                    c.get("reason_option", ""),
+                    _to_json_str(c.get("reason_choices"), []),
+                    c.get("comment", ""), c.get("interval_hours", 0), c.get("duration_hours", 0),
+                    c.get("max_cycles", 1), c.get("cycle_count", 0), c.get("status", "ready"),
+                    c.get("next_run_at"), c.get("ends_at"), c.get("created_by"), c.get("created_at"),
+                    c.get("last_run_at"), c.get("last_result")
+                ))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass

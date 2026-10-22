@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("API_ID", "1")
 os.environ.setdefault("API_HASH", "test")
 os.environ.setdefault("BOT_TOKEN", "1:test")
+os.environ["MONGO_URI"] = ""
 
 from database import Database
 from utils.review_scheduler import ReviewScheduler
@@ -474,6 +475,33 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             # No duplicate reminder: next date is in the future and the cycle was claimed.
             await scheduler.tick()
             self.assertEqual(len(bot.sent), 1)
+
+    async def test_campaign_scheduler_due_detection(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            from config import get_now
+            from utils.campaign_scheduler import CampaignScheduler
+            from utils.review_utils import parse_iso
+            db = Database(os.path.join(tempdir, "test.db"))
+            cid = db.create_report_campaign({
+                "name": "Test due",
+                "target": "https://t.me/testchannel",
+                "created_by": 1,
+                "interval_hours": 2.0,
+                "duration_hours": 24.0,
+            })
+            # When created, next_run_at is set to now (or past)
+            past_time = (get_now() - timedelta(minutes=10)).isoformat(timespec="seconds")
+            db.update_report_campaign(cid, status="active", next_run_at=past_time)
+
+            due = db.get_due_report_campaigns()
+            self.assertEqual(len(due), 1)
+            self.assertEqual(due[0]["id"], cid)
+
+            # Test parse_iso with aware string
+            aware_str = "2026-10-22T16:54:58+00:00"
+            parsed = parse_iso(aware_str)
+            self.assertIsNotNone(parsed)
+            self.assertIsNone(parsed.tzinfo)  # Must be naive converted to BOT_TZ
 
 
 if __name__ == "__main__":

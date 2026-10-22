@@ -6,9 +6,31 @@ archives to source control.
 """
 
 import os
+from datetime import datetime
 from pathlib import Path
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # type: ignore
+
 BASE_DIR = Path(__file__).resolve().parent
+
+BOT_TIMEZONE_NAME = (os.getenv("TIMEZONE") or os.getenv("TZ") or "Asia/Kolkata").strip()
+try:
+    BOT_TZ = ZoneInfo(BOT_TIMEZONE_NAME)
+except Exception:
+    try:
+        BOT_TZ = ZoneInfo("Asia/Kolkata")
+    except Exception:
+        BOT_TZ = None
+
+
+def get_now() -> datetime:
+    """Return current naive datetime in the configured bot timezone."""
+    if BOT_TZ is not None:
+        return datetime.now(BOT_TZ).replace(tzinfo=None)
+    return datetime.now()
 
 
 def _load_dotenv(path: Path) -> None:

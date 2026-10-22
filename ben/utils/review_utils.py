@@ -87,6 +87,12 @@ def display_channel(identifier: str, title: str = None, username: str = None) ->
 
 
 def session_base_path(session_file: str) -> str:
+    from config import SESSIONS_FOLDER
+    if session_file and not os.path.isfile(session_file):
+        fname = os.path.basename(session_file.replace("\\", "/"))
+        cand = os.path.join(SESSIONS_FOLDER, fname)
+        if os.path.isfile(cand):
+            session_file = cand
     if session_file.lower().endswith(".session"):
         return session_file[:-8]
     return session_file
@@ -314,7 +320,14 @@ def parse_iso(value: str):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is not None:
+            from config import BOT_TZ
+            if BOT_TZ is not None:
+                dt = dt.astimezone(BOT_TZ).replace(tzinfo=None)
+            else:
+                dt = dt.replace(tzinfo=None)
+        return dt
     except (TypeError, ValueError):
         return None
 

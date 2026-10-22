@@ -152,17 +152,19 @@ class Database:
                     cursor.execute('''
                         INSERT OR REPLACE INTO report_campaigns (
                             id, name, target, account_phones, messages, reports_per_message,
-                            delay_seconds, exec_mode, dist_mode, reason, reason_detail, reason_option,
+                            delay_seconds, exec_mode, dist_mode, account_rules, reason, reason_detail, reason_option,
                             reason_choices, comment, interval_hours, duration_hours, max_cycles,
                             cycle_count, status, next_run_at, ends_at, created_by, created_at,
                             last_run_at, last_result
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         c.get("id"), c.get("name"), c.get("target"),
                         json.dumps(c.get("account_phones") if isinstance(c.get("account_phones"), list) else []),
                         json.dumps(c.get("messages") if isinstance(c.get("messages"), list) else []),
                         c.get("reports_per_message", 2), c.get("delay_seconds", 5),
-                        c.get("exec_mode", "safe"), c.get("dist_mode", "all"), c.get("reason", "spam"), c.get("reason_detail", ""),
+                        c.get("exec_mode", "safe"), c.get("dist_mode", "all"),
+                        json.dumps(c.get("account_rules") if isinstance(c.get("account_rules"), dict) else {}),
+                        c.get("reason", "spam"), c.get("reason_detail", ""),
                         c.get("reason_option", ""),
                         json.dumps(c.get("reason_choices") if isinstance(c.get("reason_choices"), list) else []),
                         c.get("comment", ""), c.get("interval_hours", 0), c.get("duration_hours", 0),
@@ -434,6 +436,7 @@ class Database:
                 delay_seconds INTEGER DEFAULT 5,
                 exec_mode TEXT DEFAULT 'safe',
                 dist_mode TEXT DEFAULT 'all',
+                account_rules TEXT DEFAULT '{}',
                 reason TEXT DEFAULT 'spam',
                 reason_detail TEXT DEFAULT '',
                 reason_option TEXT DEFAULT '',
@@ -461,6 +464,7 @@ class Database:
             ('duration_hours', 'REAL DEFAULT 0'),
             ('ends_at', 'TEXT'),
             ('dist_mode', "TEXT DEFAULT 'all'"),
+            ('account_rules', "TEXT DEFAULT '{}'"),
         ]:
             self._ensure_column(cursor, 'report_campaigns', col, col_type)
 
@@ -1979,11 +1983,11 @@ class Database:
         cursor.execute('''
             INSERT INTO report_campaigns
                 (name, target, account_phones, messages, reports_per_message,
-                 delay_seconds, exec_mode, dist_mode, reason, reason_detail, reason_option,
+                 delay_seconds, exec_mode, dist_mode, account_rules, reason, reason_detail, reason_option,
                  reason_choices, comment, interval_hours, duration_hours, max_cycles,
                  cycle_count, status, next_run_at, ends_at, created_by, created_at,
                  last_run_at, last_result)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NULL, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NULL, NULL)
         ''', (
             data.get('name') or '',
             data['target'],
@@ -1993,6 +1997,7 @@ class Database:
             int(data.get('delay_seconds') or 5),
             data.get('exec_mode') or 'safe',
             data.get('dist_mode') or 'all',
+            json.dumps(data.get('account_rules') or {}),
             data.get('reason') or 'spam',
             data.get('reason_detail') or '',
             data.get('reason_option') or '',
@@ -2026,6 +2031,10 @@ class Database:
                 campaign[field] = json.loads(campaign.get(field) or '[]')
             except (TypeError, ValueError):
                 campaign[field] = []
+        try:
+            campaign['account_rules'] = json.loads(campaign.get('account_rules') or '{}')
+        except (TypeError, ValueError):
+            campaign['account_rules'] = {}
         campaign['dist_mode'] = campaign.get('dist_mode') or 'all'
         return campaign
 
@@ -2071,7 +2080,7 @@ class Database:
     def update_report_campaign(self, campaign_id: int, **fields) -> bool:
         allowed = {
             'name', 'target', 'account_phones', 'messages', 'reports_per_message',
-            'delay_seconds', 'exec_mode', 'dist_mode', 'reason', 'reason_detail',
+            'delay_seconds', 'exec_mode', 'dist_mode', 'account_rules', 'reason', 'reason_detail',
             'reason_option', 'reason_choices', 'comment', 'interval_hours', 'duration_hours',
             'max_cycles', 'cycle_count',
             'status', 'next_run_at', 'ends_at', 'last_run_at', 'last_result',
@@ -2083,6 +2092,8 @@ class Database:
                 continue
             if key in ('account_phones', 'messages', 'reason_choices'):
                 value = json.dumps(value or [])
+            elif key == 'account_rules':
+                value = json.dumps(value or {})
             updates.append(f"{key} = ?")
             values.append(value)
         if not updates:
@@ -2095,6 +2106,21 @@ class Database:
         conn.commit()
         conn.close()
         self._mongo_set("report_campaigns", {"id": campaign_id}, fields)
+        return changed
+
+    @db_write_lock
+    def delete_report_campaign(self, campaign_id: int) -> bool:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM report_campaigns WHERE id = ?", (campaign_id,))
+        changed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        if self.mongo_db is not None:
+            try:
+                self.mongo_db.report_campaigns.delete_one({"id": campaign_id})
+            except Exception as e:
+                log_activity(f"[MongoDB] Error deleting campaign #{campaign_id}: {e}")
         return changed
 
     @db_write_lock

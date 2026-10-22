@@ -662,7 +662,7 @@ class ReportEngine:
         self, target: str, message_links: list, reports_per_account: int,
         delay: int, reason: str, comment: str, progress_message,
         allowed_phones=None, reason_option: str = "", reason_choices: list = None,
-        dist_mode: str = "all"
+        dist_mode: str = "all", account_rules: dict = None
     ):
         """Run complete report session sequentially."""
         active_accounts = db.get_active_accounts()
@@ -675,16 +675,27 @@ class ReportEngine:
         
         total_accounts = len(active_accounts)
         items_list = list(message_links) if message_links else [None]
-        if dist_mode == "round_robin" and message_links:
-            num_msgs = len(message_links)
-            total_assigned = sum(
-                len([m for i, m in enumerate(message_links) if i % total_accounts == a])
-                if total_accounts <= num_msgs else 1
-                for a in range(total_accounts)
-            )
-            total_reports = total_assigned * reports_per_account
-        else:
-            total_reports = total_accounts * reports_per_account * len(items_list)
+        total_assigned = 0
+        for a_idx, a_acc in enumerate(active_accounts):
+            a_phone = a_acc[1]
+            a_rule = (account_rules or {}).get(a_phone) or {}
+            if a_rule.get("messages") is not None and a_rule.get("messages") != "all" and message_links:
+                r_indices = a_rule.get("messages")
+                if isinstance(r_indices, list):
+                    a_count = len([i for i in r_indices if 0 <= i < len(message_links)])
+                else:
+                    a_count = len(items_list)
+                total_assigned += max(1, a_count)
+            elif dist_mode == "round_robin" and message_links:
+                num_msgs = len(message_links)
+                if total_accounts <= num_msgs:
+                    a_count = len([m for i, m in enumerate(message_links) if i % total_accounts == a_idx])
+                else:
+                    a_count = 1
+                total_assigned += a_count
+            else:
+                total_assigned += len(items_list)
+        total_reports = total_assigned * reports_per_account
         completed_reports = 0
         success_count = 0
         failed_count = 0
@@ -712,7 +723,16 @@ class ReportEngine:
                     continue
                 log_activity(f"Account {phone} joined {target} ({join_message})")
 
-                if dist_mode == "round_robin" and message_links:
+                a_rule = (account_rules or {}).get(phone) or {}
+                if a_rule.get("messages") is not None and a_rule.get("messages") != "all" and message_links:
+                    r_indices = a_rule.get("messages")
+                    if isinstance(r_indices, list):
+                        acc_items = [message_links[i] for i in r_indices if 0 <= i < len(message_links)]
+                    else:
+                        acc_items = items_list
+                    if not acc_items:
+                        acc_items = items_list
+                elif dist_mode == "round_robin" and message_links:
                     num_msgs = len(message_links)
                     if total_accounts <= num_msgs:
                         acc_items = [m for i, m in enumerate(message_links) if i % total_accounts == acc_idx]
@@ -731,7 +751,11 @@ class ReportEngine:
 
                         await set_account_online(client, offline=False)
 
-                        choices = reason_choices or []
+                        if a_rule.get("reasons"):
+                            choices = a_rule.get("reasons")
+                        else:
+                            choices = reason_choices or []
+
                         if len(choices) >= 2:
                             choice = choices[report_num % len(choices)]
                         elif len(choices) == 1:
@@ -754,14 +778,16 @@ class ReportEngine:
                         choice_comment = (choice.get("comment") or "").strip()
                         if choice_comment:
                             report_comment = choice_comment
-                        elif comment:
-                            c_lines = [l.strip() for l in comment.split("\n") if l.strip()]
-                            if len(c_lines) > 1:
-                                report_comment = c_lines[report_num % len(c_lines)]
-                            else:
-                                report_comment = comment
                         else:
-                            report_comment = ""
+                            active_comment = a_rule.get("comment") if (a_rule.get("comment") is not None and a_rule.get("comment") != "") else comment
+                            if active_comment:
+                                c_lines = [l.strip() for l in active_comment.split("\n") if l.strip()]
+                                if len(c_lines) > 1:
+                                    report_comment = c_lines[report_num % len(c_lines)]
+                                else:
+                                    report_comment = active_comment
+                            else:
+                                report_comment = ""
 
                         if message_link:
                             success = await self.report_message(
@@ -851,7 +877,7 @@ class ReportEngine:
         self, target: str, message_links: list, reports_per_account: int,
         reason: str, comment: str, progress_message,
         allowed_phones=None, reason_option: str = "", reason_choices: list = None,
-        dist_mode: str = "all"
+        dist_mode: str = "all", account_rules: dict = None
     ):
         """Run complete report session concurrently (Turbo Mode)."""
         active_accounts = db.get_active_accounts()
@@ -864,16 +890,27 @@ class ReportEngine:
         
         total_accounts = len(active_accounts)
         items_list = list(message_links) if message_links else [None]
-        if dist_mode == "round_robin" and message_links:
-            num_msgs = len(message_links)
-            total_assigned = sum(
-                len([m for i, m in enumerate(message_links) if i % total_accounts == a])
-                if total_accounts <= num_msgs else 1
-                for a in range(total_accounts)
-            )
-            total_reports = total_assigned * reports_per_account
-        else:
-            total_reports = total_accounts * reports_per_account * len(items_list)
+        total_assigned = 0
+        for a_idx, a_acc in enumerate(active_accounts):
+            a_phone = a_acc[1]
+            a_rule = (account_rules or {}).get(a_phone) or {}
+            if a_rule.get("messages") is not None and a_rule.get("messages") != "all" and message_links:
+                r_indices = a_rule.get("messages")
+                if isinstance(r_indices, list):
+                    a_count = len([i for i in r_indices if 0 <= i < len(message_links)])
+                else:
+                    a_count = len(items_list)
+                total_assigned += max(1, a_count)
+            elif dist_mode == "round_robin" and message_links:
+                num_msgs = len(message_links)
+                if total_accounts <= num_msgs:
+                    a_count = len([m for i, m in enumerate(message_links) if i % total_accounts == a_idx])
+                else:
+                    a_count = 1
+                total_assigned += a_count
+            else:
+                total_assigned += len(items_list)
+        total_reports = total_assigned * reports_per_account
         completed_reports = 0
         success_count = 0
         failed_count = 0
@@ -927,7 +964,16 @@ class ReportEngine:
                     log_activity(f"[Worker {phone}] Not joined to {target}; skipping: {join_message}")
                     return
 
-                if dist_mode == "round_robin" and message_links:
+                a_rule = (account_rules or {}).get(phone) or {}
+                if a_rule.get("messages") is not None and a_rule.get("messages") != "all" and message_links:
+                    r_indices = a_rule.get("messages")
+                    if isinstance(r_indices, list):
+                        acc_items = [message_links[i] for i in r_indices if 0 <= i < len(message_links)]
+                    else:
+                        acc_items = items_list
+                    if not acc_items:
+                        acc_items = items_list
+                elif dist_mode == "round_robin" and message_links:
                     num_msgs = len(message_links)
                     if total_accounts <= num_msgs:
                         acc_items = [m for i, m in enumerate(message_links) if i % total_accounts == account_idx]
@@ -946,7 +992,11 @@ class ReportEngine:
 
                         await set_account_online(client, offline=False)
 
-                        choices = reason_choices or []
+                        if a_rule.get("reasons"):
+                            choices = a_rule.get("reasons")
+                        else:
+                            choices = reason_choices or []
+
                         if len(choices) >= 2:
                             choice = choices[report_num % len(choices)]
                         elif len(choices) == 1:
@@ -969,14 +1019,16 @@ class ReportEngine:
                         choice_comment = (choice.get("comment") or "").strip()
                         if choice_comment:
                             report_comment = choice_comment
-                        elif comment:
-                            c_lines = [l.strip() for l in comment.split("\n") if l.strip()]
-                            if len(c_lines) > 1:
-                                report_comment = c_lines[report_num % len(c_lines)]
-                            else:
-                                report_comment = comment
                         else:
-                            report_comment = ""
+                            active_comment = a_rule.get("comment") if (a_rule.get("comment") is not None and a_rule.get("comment") != "") else comment
+                            if active_comment:
+                                c_lines = [l.strip() for l in active_comment.split("\n") if l.strip()]
+                                if len(c_lines) > 1:
+                                    report_comment = c_lines[report_num % len(c_lines)]
+                                else:
+                                    report_comment = active_comment
+                            else:
+                                report_comment = ""
 
                         if message_link:
                             success = await self.report_message(

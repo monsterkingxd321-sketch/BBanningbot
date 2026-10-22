@@ -1023,8 +1023,9 @@ def _campaign_view_buttons(campaign: dict):
     if status != "stopped":
         buttons.append([Button.inline("Stop", f"cmp:stop:{campaign_id}".encode())])
     
-    # Edit Campaign button always available
-    buttons.append([Button.inline("Edit Campaign", f"cmp:edit:{campaign_id}".encode())])
+    # Edit Campaign and Delete Campaign buttons
+    buttons.append([Button.inline("Edit Campaign", f"cmp:edit:{campaign_id}".encode()),
+                    Button.inline("Delete Campaign", f"cmp:del:{campaign_id}".encode())])
 
     buttons.append([Button.inline("Campaigns", b"cmp:list:0"), _main_button()])
     return buttons
@@ -1047,18 +1048,39 @@ async def show_campaign_view(event, campaign_id: int):
     await _render(event, _campaign_text(campaign), buttons=_campaign_view_buttons(campaign))
 
 
+async def show_delete_confirm(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.", buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    text = (
+        f"**Delete Campaign #{campaign_id}**\n\n"
+        f"Target: `{campaign.get('target')}`\n"
+        f"Name: {campaign.get('name') or 'Untitled'}\n\n"
+        "Are you sure you want to permanently delete this campaign? This action cannot be undone."
+    )
+    buttons = [
+        [Button.inline("Yes, Delete Permanently", f"cmp:del_confirm:{campaign_id}".encode())],
+        [Button.inline("Cancel", f"cmp:view:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
 async def show_campaign_edit_menu(event, campaign_id: int):
     campaign = db.get_report_campaign(campaign_id)
     if not campaign:
         await _render(event, "Campaign not found.",
                       buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
         return
+    rules = campaign.get("account_rules") or {}
+    custom_count = len(rules)
     text = (
         f"**Edit Campaign #{campaign_id}: {campaign.get('name') or 'Untitled'}**\n\n"
         f"Target: `{campaign.get('target')}`\n"
         f"Accounts: {len(campaign.get('account_phones') or []) or 'All active'}\n"
         f"Message links: {len(campaign.get('messages') or [])}\n"
         f"Distribution: {_dist_text(campaign.get('dist_mode'))}\n"
+        f"Account rules: {custom_count} custom configured\n"
         f"Reports per link: {campaign.get('reports_per_message')}\n"
         f"Delay: {campaign.get('delay_seconds')}s\n"
         f"Report types:\n{_campaign_reason_text(campaign)}\n"
@@ -1071,12 +1093,203 @@ async def show_campaign_edit_menu(event, campaign_id: int):
          Button.inline("Accounts", f"cmp:ed_acc:{campaign_id}".encode())],
         [Button.inline("Message Links (Scrape)", f"cmp:ed_msg:{campaign_id}".encode()),
          Button.inline("Distribution Mode", f"cmp:ed_dist:{campaign_id}".encode())],
+        [Button.inline(f"Account Rules ({custom_count} custom)", f"cmp:ed_acrules:{campaign_id}".encode())],
         [Button.inline("Reports per Link", f"cmp:ed_rpm:{campaign_id}".encode()),
          Button.inline("Delay Seconds", f"cmp:ed_dly:{campaign_id}".encode())],
         [Button.inline("Reasons & Comments", f"cmp:fixreasons:{campaign_id}".encode()),
          Button.inline("Interval & Duration", f"cmp:ed_time:{campaign_id}".encode())],
+        [Button.inline("Delete Campaign", f"cmp:del:{campaign_id}".encode())],
         [Button.inline("Back to Campaign", f"cmp:view:{campaign_id}".encode())]
     ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_account_rules_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.", buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    accounts = db.get_active_accounts()
+    assigned = campaign.get("account_phones") or []
+    if assigned:
+        accounts = [acc for acc in accounts if acc[1] in set(assigned)]
+    rules = campaign.get("account_rules") or {}
+
+    text = (
+        f"**Account Rules & Custom Reporting (Campaign #{campaign_id})**\n\n"
+        f"Target: `{campaign.get('target')}`\n"
+        f"Accounts: {len(accounts)} | Custom Configured: {len(rules)}\n\n"
+        "Configure custom report reasons, comments, or targeted messages for individual accounts. "
+        "Accounts without custom rules use the campaign defaults.\n\n"
+        "Tap an account to configure:"
+    )
+    buttons = []
+    for acc in accounts:
+        phone = acc[1]
+        rule = rules.get(phone)
+        tag = "[Custom]" if rule else "[Default]"
+        masked = mask_phone(phone)
+        summary = ""
+        if rule:
+            r_list = rule.get("reasons") or []
+            r_name = r_list[0].get("detail") or r_list[0].get("reason") if r_list else "Default reason"
+            m_spec = rule.get("messages")
+            if m_spec == "all" or m_spec is None:
+                m_txt = "All msgs"
+            elif isinstance(m_spec, list):
+                m_txt = f"Msgs: {','.join(str(i+1) for i in m_spec)}" if m_spec else "All msgs"
+            else:
+                m_txt = "All msgs"
+            summary = f" ({r_name} | {m_txt})"
+        label = f"{tag} {masked}{summary}"[:40]
+        buttons.append([Button.inline(label, f"cmp:ed_ar_acc:{campaign_id}:{phone}".encode())])
+    
+    if rules:
+        buttons.append([Button.inline("Clear All Custom Rules", f"cmp:ed_ar_clear_all:{campaign_id}".encode())])
+    buttons.append([Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())])
+    await _render(event, text, buttons=buttons)
+
+
+async def show_account_rule_editor(event, campaign_id: int, phone: str):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.")
+        return
+    rules = campaign.get("account_rules") or {}
+    rule = rules.get(phone) or {}
+    msgs = campaign.get("messages") or []
+
+    reasons = rule.get("reasons")
+    if reasons:
+        r_txt = ", ".join(r.get("detail") or r.get("reason") for r in reasons)
+    else:
+        r_txt = "Campaign Default (" + ", ".join(r.get("detail") or r.get("reason") for r in (campaign.get("reason_choices") or [])) + ")"
+
+    m_spec = rule.get("messages")
+    if m_spec == "all" or m_spec is None:
+        m_txt = f"All Messages ({len(msgs)} posts) / Campaign Strategy"
+    elif isinstance(m_spec, list):
+        if not m_spec:
+            m_txt = "All Messages"
+        else:
+            m_txt = ", ".join(f"Message #{i+1}" for i in m_spec)
+    else:
+        m_txt = "All Messages"
+
+    comm = rule.get("comment")
+    if comm is not None and comm != "":
+        c_txt = comm
+    else:
+        c_txt = "Campaign Default (" + (campaign.get("comment") or "none") + ")"
+
+    text = (
+        f"**Custom Rule for Account: {mask_phone(phone)}**\n"
+        f"Campaign: #{campaign_id} (`{campaign.get('target')}`)\n\n"
+        f"Current Report Reasons:\n`{r_txt}`\n\n"
+        f"Targeted Messages:\n`{m_txt}`\n\n"
+        f"Comment:\n`{c_txt}`\n\n"
+        "Customize this account's reporting behavior:"
+    )
+    buttons = [
+        [Button.inline("Choose Report Reason", f"cmp:ed_ar_rsn:{campaign_id}:{phone}".encode()),
+         Button.inline("Choose Targeted Messages", f"cmp:ed_ar_msg:{campaign_id}:{phone}".encode())],
+        [Button.inline("Set Custom Comment", f"cmp:ed_ar_comm:{campaign_id}:{phone}".encode()),
+         Button.inline("Reset to Default", f"cmp:ed_ar_reset:{campaign_id}:{phone}".encode())],
+        [Button.inline("Copy Rule to Other Accounts", f"cmp:ed_ar_copy:{campaign_id}:{phone}".encode())],
+        [Button.inline("Back to Account Rules", f"cmp:ed_acrules:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_account_reason_picker(event, campaign_id: int, phone: str):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.")
+        return
+    reasons_list = [
+        ("spam", "Spam"),
+        ("fake", "Fake Account / Scam"),
+        ("violence", "Violence"),
+        ("pornography", "Pornography"),
+        ("child_abuse", "Child Abuse"),
+        ("illegal_drugs", "Illegal Drugs"),
+        ("personal_details", "Personal Details"),
+        ("copyright", "Copyright"),
+    ]
+    text = (
+        f"**Select Report Reason for {mask_phone(phone)}**\n\n"
+        "Choose which reason this specific account will send when reporting:"
+    )
+    buttons = []
+    row = []
+    for key, label in reasons_list:
+        row.append(Button.inline(label, f"cmp:ed_ar_rsn_pick:{campaign_id}:{phone}:{key}".encode()))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([Button.inline("Use Campaign Default Reasons", f"cmp:ed_ar_rsn_def:{campaign_id}:{phone}".encode())])
+    buttons.append([Button.inline("Back", f"cmp:ed_ar_acc:{campaign_id}:{phone}".encode())])
+    await _render(event, text, buttons=buttons)
+
+
+async def show_account_message_picker(event, campaign_id: int, phone: str):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.")
+        return
+    rules = campaign.get("account_rules") or {}
+    rule = rules.get(phone) or {}
+    msgs = campaign.get("messages") or []
+    m_spec = rule.get("messages")
+    is_all = (m_spec == "all" or m_spec is None)
+    selected_indices = set(m_spec) if isinstance(m_spec, list) else set()
+
+    text = (
+        f"**Targeted Messages for {mask_phone(phone)}**\n\n"
+        f"Total Messages in Channel: {len(msgs)}\n\n"
+        "Select whether this account reports All Messages or only specific message(s):"
+    )
+    buttons = []
+    all_tag = "[X] " if is_all else "[ ] "
+    buttons.append([Button.inline(f"{all_tag}All Messages / Follow Strategy", f"cmp:ed_ar_msgtog:{campaign_id}:{phone}:all".encode())])
+    row = []
+    for idx in range(len(msgs)):
+        tag = "[X] " if (not is_all and idx in selected_indices) else "[ ] "
+        row.append(Button.inline(f"{tag}Message #{idx+1}", f"cmp:ed_ar_msgtog:{campaign_id}:{phone}:{idx}".encode()))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([Button.inline("Done / Back", f"cmp:ed_ar_acc:{campaign_id}:{phone}".encode())])
+    await _render(event, text, buttons=buttons)
+
+
+async def show_account_copy_picker(event, campaign_id: int, phone: str):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.")
+        return
+    accounts = db.get_active_accounts()
+    assigned = campaign.get("account_phones") or []
+    if assigned:
+        accounts = [acc for acc in accounts if acc[1] in set(assigned)]
+    other_accounts = [acc for acc in accounts if acc[1] != phone]
+
+    text = (
+        f"**Copy Rule from {mask_phone(phone)} to Other Accounts**\n\n"
+        "Tap an account below to apply the exact same reporting rule to it, "
+        "or apply to all other accounts at once:"
+    )
+    buttons = []
+    for acc in other_accounts:
+        o_phone = acc[1]
+        buttons.append([Button.inline(f"Apply to {mask_phone(o_phone)}", f"cmp:ed_ar_copy_to:{campaign_id}:{phone}:{o_phone}".encode())])
+    if other_accounts:
+        buttons.append([Button.inline("Apply to ALL Other Accounts", f"cmp:ed_ar_copy_all:{campaign_id}:{phone}".encode())])
+    buttons.append([Button.inline("Back", f"cmp:ed_ar_acc:{campaign_id}:{phone}".encode())])
     await _render(event, text, buttons=buttons)
 
 
@@ -1856,6 +2069,201 @@ async def handle_campaign_callback(event, data: str):
             await _render(event, text, buttons=buttons)
             return
 
+        if action == "del" and arg:
+            await show_delete_confirm(event, int(arg))
+            return
+        if action == "del_confirm" and arg:
+            cid = int(arg)
+            engine = active_campaigns.get(cid)
+            if engine is not None:
+                engine.should_stop = True
+            active_campaigns.pop(cid, None)
+            success = db.delete_report_campaign(cid)
+            if success:
+                await _render(event, f"Campaign #{cid} deleted permanently.",
+                              buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+            else:
+                await _render(event, "Failed to delete campaign or campaign not found.",
+                              buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+            return
+        if action == "ed_acrules" and arg:
+            await show_account_rules_menu(event, int(arg))
+            return
+        if action == "ed_ar_acc" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            await show_account_rule_editor(event, cid, phone)
+            return
+        if action == "ed_ar_rsn" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            await show_account_reason_picker(event, cid, phone)
+            return
+        if action == "ed_ar_rsn_def" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            campaign = db.get_report_campaign(cid)
+            if campaign:
+                rules = dict(campaign.get("account_rules") or {})
+                if phone in rules and "reasons" in rules[phone]:
+                    del rules[phone]["reasons"]
+                    if not rules[phone]:
+                        del rules[phone]
+                    db.update_report_campaign(cid, account_rules=rules)
+            await show_account_rule_editor(event, cid, phone)
+            return
+        if action == "ed_ar_rsn_pick" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            r_key = parts[4] if len(parts) > 4 else "spam"
+            campaign = db.get_report_campaign(cid)
+            if campaign:
+                labels = {
+                    "spam": "Spam",
+                    "fake": "Fake Account / Scam",
+                    "violence": "Violence",
+                    "pornography": "Pornography",
+                    "child_abuse": "Child Abuse",
+                    "illegal_drugs": "Illegal Drugs",
+                    "personal_details": "Personal Details",
+                    "copyright": "Copyright",
+                }
+                reason_obj = {"reason": r_key, "detail": labels.get(r_key, r_key), "option": ""}
+                rules = dict(campaign.get("account_rules") or {})
+                rule = dict(rules.get(phone) or {})
+                rule["reasons"] = [reason_obj]
+                rules[phone] = rule
+                db.update_report_campaign(cid, account_rules=rules)
+            await show_account_rule_editor(event, cid, phone)
+            return
+        if action == "ed_ar_msg" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            await show_account_message_picker(event, cid, phone)
+            return
+        if action == "ed_ar_msgtog" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            val = parts[4] if len(parts) > 4 else "all"
+            campaign = db.get_report_campaign(cid)
+            if campaign:
+                rules = dict(campaign.get("account_rules") or {})
+                rule = dict(rules.get(phone) or {})
+                if val == "all":
+                    rule["messages"] = "all"
+                else:
+                    try:
+                        idx = int(val)
+                    except ValueError:
+                        idx = 0
+                    curr = rule.get("messages")
+                    if curr == "all" or not isinstance(curr, list):
+                        rule["messages"] = [idx]
+                    else:
+                        s = set(curr)
+                        if idx in s:
+                            s.remove(idx)
+                        else:
+                            s.add(idx)
+                        rule["messages"] = sorted(list(s))
+                        if not rule["messages"]:
+                            rule["messages"] = "all"
+                rules[phone] = rule
+                db.update_report_campaign(cid, account_rules=rules)
+            await show_account_message_picker(event, cid, phone)
+            return
+        if action == "ed_ar_comm" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            db.set_user_state(user_id, CAMPAIGN_STATE, {
+                "step": "edit_ar_comm",
+                "edit_campaign_id": cid,
+                "phone": phone
+            })
+            text, buttons = _custom_prompt(
+                f"**Custom Comment for Account {mask_phone(phone)}**\n\n"
+                "Send the custom comment text to send with this account's reports (or type 'none' to remove comment):",
+                f"cmp:ed_ar_acc:{cid}:{phone}".encode()
+            )
+            buttons.insert(0, [Button.inline("Use Campaign Default Comment", f"cmp:ed_ar_comm_clr:{cid}:{phone}".encode())])
+            await _render(event, text, buttons=buttons)
+            return
+        if action == "ed_ar_comm_clr" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            campaign = db.get_report_campaign(cid)
+            if campaign:
+                rules = dict(campaign.get("account_rules") or {})
+                if phone in rules and "comment" in rules[phone]:
+                    del rules[phone]["comment"]
+                    if not rules[phone]:
+                        del rules[phone]
+                    db.update_report_campaign(cid, account_rules=rules)
+            db.clear_user_state(user_id)
+            await show_account_rule_editor(event, cid, phone)
+            return
+        if action == "ed_ar_reset" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            campaign = db.get_report_campaign(cid)
+            if campaign:
+                rules = dict(campaign.get("account_rules") or {})
+                if phone in rules:
+                    del rules[phone]
+                    db.update_report_campaign(cid, account_rules=rules)
+            await show_account_rules_menu(event, cid)
+            return
+        if action == "ed_ar_clear_all" and arg:
+            cid = int(arg)
+            db.update_report_campaign(cid, account_rules={})
+            await show_account_rules_menu(event, cid)
+            return
+        if action == "ed_ar_copy" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            await show_account_copy_picker(event, cid, phone)
+            return
+        if action == "ed_ar_copy_to" and arg:
+            cid = int(arg)
+            src = parts[3] if len(parts) > 3 else ""
+            tgt = parts[4] if len(parts) > 4 else ""
+            campaign = db.get_report_campaign(cid)
+            if campaign and src and tgt:
+                rules = dict(campaign.get("account_rules") or {})
+                src_rule = rules.get(src)
+                import copy
+                if src_rule:
+                    rules[tgt] = copy.deepcopy(src_rule)
+                else:
+                    if tgt in rules:
+                        del rules[tgt]
+                db.update_report_campaign(cid, account_rules=rules)
+            await show_account_copy_picker(event, cid, src)
+            return
+        if action == "ed_ar_copy_all" and arg:
+            cid = int(arg)
+            src = parts[3] if len(parts) > 3 else ""
+            campaign = db.get_report_campaign(cid)
+            if campaign and src:
+                accounts = db.get_active_accounts()
+                assigned = campaign.get("account_phones") or []
+                if assigned:
+                    accounts = [acc for acc in accounts if acc[1] in set(assigned)]
+                rules = dict(campaign.get("account_rules") or {})
+                src_rule = rules.get(src)
+                import copy
+                for acc in accounts:
+                    o_phone = acc[1]
+                    if o_phone != src:
+                        if src_rule:
+                            rules[o_phone] = copy.deepcopy(src_rule)
+                        else:
+                            if o_phone in rules:
+                                del rules[o_phone]
+                db.update_report_campaign(cid, account_rules=rules)
+            await show_account_rules_menu(event, cid)
+            return
+
         flow = _require_flow(event, user_id)
         if not flow:
             await _render(event, 
@@ -2439,6 +2847,31 @@ async def handle_campaign_text(event, data: dict):
         db.update_report_campaign(cid, duration_hours=hours)
         db.clear_user_state(user_id)
         await show_campaign_edit_menu(event, cid)
+        return
+
+    if step == "edit_ar_comm":
+        cid = int(data.get("edit_campaign_id") or 0)
+        phone = data.get("phone") or ""
+        campaign = db.get_report_campaign(cid)
+        if not campaign:
+            await event.respond("Campaign not found.")
+            return
+        rules = dict(campaign.get("account_rules") or {})
+        rule = dict(rules.get(phone) or {})
+        clean_txt = text.strip()
+        if clean_txt.lower() in ("none", "clear", "default"):
+            if "comment" in rule:
+                del rule["comment"]
+        else:
+            rule["comment"] = clean_txt[:1000]
+        if rule:
+            rules[phone] = rule
+        else:
+            if phone in rules:
+                del rules[phone]
+        db.update_report_campaign(cid, account_rules=rules)
+        db.clear_user_state(user_id)
+        await show_account_rule_editor(event, cid, phone)
         return
 
     if step == "comment_text":

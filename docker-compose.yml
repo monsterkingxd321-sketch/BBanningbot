@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  banning-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: banning-bot
+    restart: always
+    env_file:
+      - ben/.env
+    volumes:
+      - ./ben/sessions:/app/sessions
+      - ./ben/logs:/app/logs
+      - ./ben/exports:/app/exports
+      - ./ben/database.db:/app/database.db

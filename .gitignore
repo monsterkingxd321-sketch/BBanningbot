@@ -1,0 +1,45 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Telegram sessions and SQLite auth keys
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+**/*.session
+**/*.session-journal
+**/*.session-wal
+**/*.session-shm
+
+# Databases
+*.db
+*.db-wal
+*.db-shm
+**/*.db
+**/*.db-wal
+**/*.db-shm
+
+# Data and export folders
+sessions/
+**/sessions/
+logs/
+**/logs/
+exports/
+**/exports/
+credentials/
+**/credentials/
+
+# Python cache & virtual environments
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+*.zip

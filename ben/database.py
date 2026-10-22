@@ -152,17 +152,17 @@ class Database:
                     cursor.execute('''
                         INSERT OR REPLACE INTO report_campaigns (
                             id, name, target, account_phones, messages, reports_per_message,
-                            delay_seconds, exec_mode, reason, reason_detail, reason_option,
+                            delay_seconds, exec_mode, dist_mode, reason, reason_detail, reason_option,
                             reason_choices, comment, interval_hours, duration_hours, max_cycles,
                             cycle_count, status, next_run_at, ends_at, created_by, created_at,
                             last_run_at, last_result
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         c.get("id"), c.get("name"), c.get("target"),
                         json.dumps(c.get("account_phones") if isinstance(c.get("account_phones"), list) else []),
                         json.dumps(c.get("messages") if isinstance(c.get("messages"), list) else []),
                         c.get("reports_per_message", 2), c.get("delay_seconds", 5),
-                        c.get("exec_mode", "safe"), c.get("reason", "spam"), c.get("reason_detail", ""),
+                        c.get("exec_mode", "safe"), c.get("dist_mode", "all"), c.get("reason", "spam"), c.get("reason_detail", ""),
                         c.get("reason_option", ""),
                         json.dumps(c.get("reason_choices") if isinstance(c.get("reason_choices"), list) else []),
                         c.get("comment", ""), c.get("interval_hours", 0), c.get("duration_hours", 0),
@@ -433,6 +433,7 @@ class Database:
                 reports_per_message INTEGER DEFAULT 2,
                 delay_seconds INTEGER DEFAULT 5,
                 exec_mode TEXT DEFAULT 'safe',
+                dist_mode TEXT DEFAULT 'all',
                 reason TEXT DEFAULT 'spam',
                 reason_detail TEXT DEFAULT '',
                 reason_option TEXT DEFAULT '',
@@ -459,6 +460,7 @@ class Database:
             ('reason_choices', "TEXT DEFAULT '[]'"),
             ('duration_hours', 'REAL DEFAULT 0'),
             ('ends_at', 'TEXT'),
+            ('dist_mode', "TEXT DEFAULT 'all'"),
         ]:
             self._ensure_column(cursor, 'report_campaigns', col, col_type)
 
@@ -1977,11 +1979,11 @@ class Database:
         cursor.execute('''
             INSERT INTO report_campaigns
                 (name, target, account_phones, messages, reports_per_message,
-                 delay_seconds, exec_mode, reason, reason_detail, reason_option,
+                 delay_seconds, exec_mode, dist_mode, reason, reason_detail, reason_option,
                  reason_choices, comment, interval_hours, duration_hours, max_cycles,
                  cycle_count, status, next_run_at, ends_at, created_by, created_at,
                  last_run_at, last_result)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NULL, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NULL, NULL)
         ''', (
             data.get('name') or '',
             data['target'],
@@ -1990,6 +1992,7 @@ class Database:
             int(data.get('reports_per_message') or 2),
             int(data.get('delay_seconds') or 5),
             data.get('exec_mode') or 'safe',
+            data.get('dist_mode') or 'all',
             data.get('reason') or 'spam',
             data.get('reason_detail') or '',
             data.get('reason_option') or '',
@@ -2023,6 +2026,7 @@ class Database:
                 campaign[field] = json.loads(campaign.get(field) or '[]')
             except (TypeError, ValueError):
                 campaign[field] = []
+        campaign['dist_mode'] = campaign.get('dist_mode') or 'all'
         return campaign
 
     def get_report_campaign(self, campaign_id: int):
@@ -2067,7 +2071,7 @@ class Database:
     def update_report_campaign(self, campaign_id: int, **fields) -> bool:
         allowed = {
             'name', 'target', 'account_phones', 'messages', 'reports_per_message',
-            'delay_seconds', 'exec_mode', 'reason', 'reason_detail',
+            'delay_seconds', 'exec_mode', 'dist_mode', 'reason', 'reason_detail',
             'reason_option', 'reason_choices', 'comment', 'interval_hours', 'duration_hours',
             'max_cycles', 'cycle_count',
             'status', 'next_run_at', 'ends_at', 'last_run_at', 'last_result',

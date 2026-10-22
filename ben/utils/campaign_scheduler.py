@@ -132,6 +132,7 @@ class CampaignScheduler:
                 engine.should_stop = True
 
             allowed = selected_phones or None
+            dist_mode = campaign.get("dist_mode") or "all"
             if campaign.get("exec_mode") == "turbo":
                 result = await engine.run_parallel_report_session(
                     campaign.get("target"),
@@ -143,6 +144,7 @@ class CampaignScheduler:
                     allowed_phones=allowed,
                     reason_option=campaign.get("reason_option") or "",
                     reason_choices=campaign.get("reason_choices") or [],
+                    dist_mode=dist_mode,
                 )
             else:
                 result = await engine.run_report_session(
@@ -156,6 +158,7 @@ class CampaignScheduler:
                     allowed_phones=allowed,
                     reason_option=campaign.get("reason_option") or "",
                     reason_choices=campaign.get("reason_choices") or [],
+                    dist_mode=dist_mode,
                 )
             result = result or {}
 

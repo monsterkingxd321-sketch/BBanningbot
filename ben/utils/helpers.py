@@ -661,7 +661,8 @@ class ReportEngine:
     async def run_report_session(
         self, target: str, message_links: list, reports_per_account: int,
         delay: int, reason: str, comment: str, progress_message,
-        allowed_phones=None, reason_option: str = "", reason_choices: list = None
+        allowed_phones=None, reason_option: str = "", reason_choices: list = None,
+        dist_mode: str = "all"
     ):
         """Run complete report session sequentially."""
         active_accounts = db.get_active_accounts()
@@ -674,7 +675,16 @@ class ReportEngine:
         
         total_accounts = len(active_accounts)
         items_list = list(message_links) if message_links else [None]
-        total_reports = total_accounts * reports_per_account * len(items_list)
+        if dist_mode == "round_robin" and message_links:
+            num_msgs = len(message_links)
+            total_assigned = sum(
+                len([m for i, m in enumerate(message_links) if i % total_accounts == a])
+                if total_accounts <= num_msgs else 1
+                for a in range(total_accounts)
+            )
+            total_reports = total_assigned * reports_per_account
+        else:
+            total_reports = total_accounts * reports_per_account * len(items_list)
         completed_reports = 0
         success_count = 0
         failed_count = 0
@@ -702,7 +712,16 @@ class ReportEngine:
                     continue
                 log_activity(f"Account {phone} joined {target} ({join_message})")
 
-                for msg_idx, message_link in enumerate(items_list):
+                if dist_mode == "round_robin" and message_links:
+                    num_msgs = len(message_links)
+                    if total_accounts <= num_msgs:
+                        acc_items = [m for i, m in enumerate(message_links) if i % total_accounts == acc_idx]
+                    else:
+                        acc_items = [message_links[acc_idx % num_msgs]]
+                else:
+                    acc_items = items_list
+
+                for msg_idx, message_link in enumerate(acc_items):
                     if self.should_stop:
                         break
 
@@ -831,7 +850,8 @@ class ReportEngine:
     async def run_parallel_report_session(
         self, target: str, message_links: list, reports_per_account: int,
         reason: str, comment: str, progress_message,
-        allowed_phones=None, reason_option: str = "", reason_choices: list = None
+        allowed_phones=None, reason_option: str = "", reason_choices: list = None,
+        dist_mode: str = "all"
     ):
         """Run complete report session concurrently (Turbo Mode)."""
         active_accounts = db.get_active_accounts()
@@ -844,7 +864,16 @@ class ReportEngine:
         
         total_accounts = len(active_accounts)
         items_list = list(message_links) if message_links else [None]
-        total_reports = total_accounts * reports_per_account * len(items_list)
+        if dist_mode == "round_robin" and message_links:
+            num_msgs = len(message_links)
+            total_assigned = sum(
+                len([m for i, m in enumerate(message_links) if i % total_accounts == a])
+                if total_accounts <= num_msgs else 1
+                for a in range(total_accounts)
+            )
+            total_reports = total_assigned * reports_per_account
+        else:
+            total_reports = total_accounts * reports_per_account * len(items_list)
         completed_reports = 0
         success_count = 0
         failed_count = 0
@@ -898,7 +927,16 @@ class ReportEngine:
                     log_activity(f"[Worker {phone}] Not joined to {target}; skipping: {join_message}")
                     return
 
-                for msg_idx, message_link in enumerate(items_list):
+                if dist_mode == "round_robin" and message_links:
+                    num_msgs = len(message_links)
+                    if total_accounts <= num_msgs:
+                        acc_items = [m for i, m in enumerate(message_links) if i % total_accounts == account_idx]
+                    else:
+                        acc_items = [message_links[account_idx % num_msgs]]
+                else:
+                    acc_items = items_list
+
+                for msg_idx, message_link in enumerate(acc_items):
                     if self.should_stop:
                         break
 

@@ -100,12 +100,22 @@ def _account_count(data: dict) -> int:
     return len(phones)
 
 
+def _dist_text(dist_mode: str) -> str:
+    if dist_mode == "round_robin":
+        return "1 account per link (Round-Robin)"
+    return "All accounts to all links (Full Mass)"
+
+
 def _total_reports(data: dict) -> int:
-    return (
-        len(data.get("messages") or [])
-        * int(data.get("reports_per_message") or CAMPAIGN_DEFAULT_REPORTS_PER_MESSAGE)
-        * max(1, _account_count(data))
-    )
+    msgs = len(data.get("messages") or [])
+    rpm = int(data.get("reports_per_message") or CAMPAIGN_DEFAULT_REPORTS_PER_MESSAGE)
+    accs = max(1, _account_count(data))
+    dist = data.get("dist_mode") or "all"
+    if dist == "round_robin" and msgs > 0:
+        total_assigned = msgs if accs <= msgs else accs
+        return total_assigned * rpm
+    else:
+        return (msgs if msgs > 0 else 1) * rpm * accs
 
 
 def _interval_text(hours) -> str:
@@ -465,13 +475,41 @@ async def show_delay_prompt(event, data: dict):
     await _render(event, _delay_prompt_text(data), buttons=buttons)
 
 
+def _dist_prompt_text(data: dict) -> str:
+    accs = _account_count(data)
+    msgs = len(data.get("messages") or [])
+    rpm = int(data.get("reports_per_message") or CAMPAIGN_DEFAULT_REPORTS_PER_MESSAGE)
+    all_tot = (msgs if msgs > 0 else 1) * rpm * accs
+    rr_tot = (msgs if accs <= msgs else accs) * rpm if msgs > 0 else accs * rpm
+    return (
+        "**Campaign Setup: 7 of 11 - Message Distribution**\n\n"
+        f"Accounts: {accs}\n"
+        f"Message Links: {msgs}\n"
+        f"Reports per link: {rpm}\n\n"
+        "Choose how reporting accounts report the message links:\n\n"
+        "1. **All Accounts to All Links (Full Mass)**\n"
+        f"Every active account reports every link ({all_tot} total reports).\n\n"
+        "2. **1 Account per Link (Round-Robin / Spread)**\n"
+        f"Account 1 reports Link 1, Account 2 reports Link 2, etc. ({rr_tot} total reports)."
+    )
+
+
+async def show_dist_prompt(event, data: dict):
+    buttons = [
+        [Button.inline("All Accounts to All Links (Full Mass)", b"cmp:dist:all")],
+        [Button.inline("1 Account per Link (Round-Robin)", b"cmp:dist:round_robin")],
+        [Button.inline("Back", b"cmp:back_delay"), _cancel_button()],
+    ]
+    await _render(event, _dist_prompt_text(data), buttons=buttons)
+
+
 def _reason_prompt_text(data: dict) -> str:
     return (
-        "**Campaign Setup: 7 of 10 - Main Reason**\n\n"
+        "**Campaign Setup: 8 of 11 - Main Reason**\n\n"
         "These are the exact report reasons returned by Telegram for this "
         "target. If Telegram returns more options after a reason is chosen, "
         "the next screen shows that exact list too.\n\n"
-        f"Selected delay: {data.get('delay')} seconds"
+        f"Selected distribution: {_dist_text(data.get('dist_mode'))}"
     )
 
 
@@ -617,7 +655,7 @@ async def show_reason_prompt(event, data: dict):
         buttons = report_option_buttons(result["options"], "cmp:ropt")
         buttons.append([Button.inline("Explain All Options", b"cmp:options")])
         buttons.append([Button.inline("Try Again", b"cmp:rretry"),
-                        Button.inline("Back", b"cmp:back_delay")])
+                        Button.inline("Back", b"cmp:back_dist")])
         buttons.append([_cancel_button()])
         await _render(event, _reason_prompt_text(data), buttons=buttons)
         return
@@ -642,7 +680,7 @@ async def show_reason_prompt(event, data: dict):
     _save_flow(event.sender_id, data)
     buttons = report_option_buttons(standard_options, "cmp:ropt")
     buttons.append([Button.inline("Explain All Options", b"cmp:options")])
-    buttons.append([Button.inline("Back", b"cmp:back_delay"), _cancel_button()])
+    buttons.append([Button.inline("Back", b"cmp:back_dist"), _cancel_button()])
     await _render(
         event,
         "**Telegram Report Reasons**\n\n"
@@ -677,7 +715,7 @@ async def show_stored_reason_page(event, data: dict):
     if page_index == 0:
         buttons.append([Button.inline("Explain All Options", b"cmp:options")])
         buttons.append([Button.inline("Try Again", b"cmp:rretry"),
-                        Button.inline("Back", b"cmp:back_delay")])
+                        Button.inline("Back", b"cmp:back_dist")])
     else:
         buttons.append([Button.inline("Continue with main reason", b"cmp:rskip")])
         buttons.append([Button.inline("Back", b"cmp:back_reason")])
@@ -866,6 +904,7 @@ def _summary_text(data: dict) -> str:
         f"Target: `{data.get('target')}`\n"
         f"Accounts: {accounts}\n"
         f"Message links: {len(data.get('messages') or [])}\n"
+        f"Distribution: {_dist_text(data.get('dist_mode'))}\n"
         f"Reports per link: {data.get('reports_per_message')}\n"
         f"Reports per cycle: {_total_reports(data)}\n"
         f"Delay: {data.get('delay')} seconds\n"
@@ -952,6 +991,7 @@ def _campaign_text(campaign: dict) -> str:
         f"Target: `{campaign.get('target')}`\n"
         f"Accounts: {accounts_text}\n"
         f"Message links: {len(campaign.get('messages') or [])}\n"
+        f"Distribution: {_dist_text(campaign.get('dist_mode'))}\n"
         f"Reports per link: {campaign.get('reports_per_message')}\n"
         f"Delay: {campaign.get('delay_seconds')} seconds\n"
         f"Report types:\n{_campaign_reason_text(campaign)}\n"
@@ -982,14 +1022,10 @@ def _campaign_view_buttons(campaign: dict):
         buttons.append([Button.inline("Pause", f"cmp:pause:{campaign_id}".encode())])
     if status != "stopped":
         buttons.append([Button.inline("Stop", f"cmp:stop:{campaign_id}".encode())])
-    choices = campaign.get("reason_choices") or []
-    if not choices:
-        buttons.append([
-            Button.inline(
-                "Change Report Reasons",
-                f"cmp:fixreasons:{campaign_id}".encode(),
-            )
-        ])
+    
+    # Edit Campaign button always available
+    buttons.append([Button.inline("Edit Campaign", f"cmp:edit:{campaign_id}".encode())])
+
     buttons.append([Button.inline("Campaigns", b"cmp:list:0"), _main_button()])
     return buttons
 
@@ -1009,6 +1045,219 @@ async def show_campaign_view(event, campaign_id: int):
         )
         return
     await _render(event, _campaign_text(campaign), buttons=_campaign_view_buttons(campaign))
+
+
+async def show_campaign_edit_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    text = (
+        f"**Edit Campaign #{campaign_id}: {campaign.get('name') or 'Untitled'}**\n\n"
+        f"Target: `{campaign.get('target')}`\n"
+        f"Accounts: {len(campaign.get('account_phones') or []) or 'All active'}\n"
+        f"Message links: {len(campaign.get('messages') or [])}\n"
+        f"Distribution: {_dist_text(campaign.get('dist_mode'))}\n"
+        f"Reports per link: {campaign.get('reports_per_message')}\n"
+        f"Delay: {campaign.get('delay_seconds')}s\n"
+        f"Report types:\n{_campaign_reason_text(campaign)}\n"
+        f"Repeat interval: {_interval_text(campaign.get('interval_hours'))}\n"
+        f"Run duration: {_duration_text(campaign.get('duration_hours'), one_time=float(campaign.get('interval_hours') or 0) <= 0)}\n\n"
+        "Choose a setting to edit:"
+    )
+    buttons = [
+        [Button.inline("Target", f"cmp:ed_tgt:{campaign_id}".encode()),
+         Button.inline("Accounts", f"cmp:ed_acc:{campaign_id}".encode())],
+        [Button.inline("Message Links (Scrape)", f"cmp:ed_msg:{campaign_id}".encode()),
+         Button.inline("Distribution Mode", f"cmp:ed_dist:{campaign_id}".encode())],
+        [Button.inline("Reports per Link", f"cmp:ed_rpm:{campaign_id}".encode()),
+         Button.inline("Delay Seconds", f"cmp:ed_dly:{campaign_id}".encode())],
+        [Button.inline("Reasons & Comments", f"cmp:fixreasons:{campaign_id}".encode()),
+         Button.inline("Interval & Duration", f"cmp:ed_time:{campaign_id}".encode())],
+        [Button.inline("Back to Campaign", f"cmp:view:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_edit_target_prompt(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    db.set_user_state(event.sender_id, CAMPAIGN_STATE, {
+        "step": "edit_target",
+        "edit_campaign_id": campaign_id,
+    })
+    text = (
+        f"**Edit Target for Campaign #{campaign_id}**\n\n"
+        f"Current Target: `{campaign.get('target')}`\n\n"
+        "Send the new channel username or message link (e.g. `@channel` or `https://t.me/channel`):"
+    )
+    buttons = [
+        [Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_edit_accounts_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    accounts = db.get_active_accounts()
+    selected = set(campaign.get("account_phones") or [])
+    is_all = len(selected) == 0
+    text = (
+        f"**Edit Accounts for Campaign #{campaign_id}**\n\n"
+        f"Active Accounts Available: {len(accounts)}\n"
+        f"Selected Accounts: {'All Active Accounts' if is_all else f'{len(selected)} Selected'}\n\n"
+        "Tap an account to toggle, or tap Use All Active Accounts:"
+    )
+    buttons = []
+    all_btn_text = "[X] Use All Active Accounts" if is_all else "[ ] Use All Active Accounts"
+    buttons.append([Button.inline(all_btn_text, f"cmp:ed_acc_all:{campaign_id}".encode())])
+    for acc in accounts:
+        phone = acc[1]
+        masked = mask_phone(phone)
+        tag = "[X]" if (phone in selected and not is_all) else "[ ]"
+        buttons.append([Button.inline(f"{tag} {masked}", f"cmp:ed_acc_tog:{campaign_id}:{phone}".encode())])
+    buttons.append([Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())])
+    await _render(event, text, buttons=buttons)
+
+
+async def show_edit_msg_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    msgs = campaign.get("messages") or []
+    text = (
+        f"**Edit Message Links for Campaign #{campaign_id}**\n\n"
+        f"Target: `{campaign.get('target')}`\n"
+        f"Current Stored Message Links: {len(msgs)}\n\n"
+        "Choose an option to re-scrape recent posts from the channel, or set to peer reporting only:"
+    )
+    buttons = [
+        [Button.inline("Channel Peer Only (0 posts)", f"cmp:ed_scrape:{campaign_id}:0".encode())],
+        [Button.inline("Fetch 5 Posts", f"cmp:ed_scrape:{campaign_id}:5".encode()),
+         Button.inline("Fetch 10 Posts", f"cmp:ed_scrape:{campaign_id}:10".encode())],
+        [Button.inline("Fetch 20 Posts", f"cmp:ed_scrape:{campaign_id}:20".encode()),
+         Button.inline("Fetch 50 Posts", f"cmp:ed_scrape:{campaign_id}:50".encode())],
+        [Button.inline("Fetch 100 Posts", f"cmp:ed_scrape:{campaign_id}:100".encode()),
+         Button.inline("Custom Post Count", f"cmp:ed_msg_cust:{campaign_id}".encode())],
+        [Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_edit_dist_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    dist_mode = campaign.get("dist_mode") or "all"
+    msgs = len(campaign.get("messages") or [])
+    accs = len(campaign.get("account_phones") or []) or len(db.get_active_accounts())
+    rpm = int(campaign.get("reports_per_message") or 2)
+    all_tot = (msgs if msgs > 0 else 1) * rpm * accs
+    rr_tot = (msgs if accs <= msgs else accs) * rpm if msgs > 0 else accs * rpm
+
+    text = (
+        f"**Edit Distribution Mode for Campaign #{campaign_id}**\n\n"
+        f"Current Mode: {_dist_text(dist_mode)}\n"
+        f"Accounts: {accs} | Messages: {msgs} | Reports/link: {rpm}\n\n"
+        "Select Distribution Strategy:\n\n"
+        "1. **All Accounts to All Links (Full Mass)**\n"
+        f"Every active account reports every message link ({all_tot} total reports).\n\n"
+        "2. **1 Account per Link (Spread / Round-Robin)**\n"
+        f"Account 1 reports Link 1, Account 2 reports Link 2, etc. ({rr_tot} total reports)."
+    )
+    buttons = [
+        [Button.inline(f"{'[X] ' if dist_mode == 'all' else '[ ] '}All Accounts -> All Messages", f"cmp:ed_dist_set:{campaign_id}:all".encode())],
+        [Button.inline(f"{'[X] ' if dist_mode == 'round_robin' else '[ ] '}Spread / Round-Robin (1-to-1)", f"cmp:ed_dist_set:{campaign_id}:round_robin".encode())],
+        [Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_edit_rpm_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    rpm = campaign.get("reports_per_message") or 2
+    text = (
+        f"**Edit Reports Per Link for Campaign #{campaign_id}**\n\n"
+        f"Current: {rpm} report(s) per link\n\n"
+        "Choose how many reports each account will send for each assigned message link:"
+    )
+    buttons = [
+        [Button.inline("1 Report", f"cmp:ed_rpm_set:{campaign_id}:1".encode()),
+         Button.inline("2 Reports (default)", f"cmp:ed_rpm_set:{campaign_id}:2".encode())],
+        [Button.inline("3 Reports", f"cmp:ed_rpm_set:{campaign_id}:3".encode()),
+         Button.inline("5 Reports", f"cmp:ed_rpm_set:{campaign_id}:5".encode())],
+        [Button.inline("10 Reports", f"cmp:ed_rpm_set:{campaign_id}:10".encode()),
+         Button.inline("Custom", f"cmp:ed_rpm_cust:{campaign_id}".encode())],
+        [Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_edit_delay_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    delay = campaign.get("delay_seconds") or 5
+    text = (
+        f"**Edit Delay for Campaign #{campaign_id}**\n\n"
+        f"Current: {delay} seconds\n\n"
+        "Choose delay between reports to avoid FloodWait:"
+    )
+    buttons = [
+        [Button.inline("3 seconds", f"cmp:ed_dly_set:{campaign_id}:3".encode()),
+         Button.inline("5 seconds (default)", f"cmp:ed_dly_set:{campaign_id}:5".encode())],
+        [Button.inline("10 seconds", f"cmp:ed_dly_set:{campaign_id}:10".encode()),
+         Button.inline("30 seconds", f"cmp:ed_dly_set:{campaign_id}:30".encode())],
+        [Button.inline("60 seconds", f"cmp:ed_dly_set:{campaign_id}:60".encode()),
+         Button.inline("Custom Delay", f"cmp:ed_dly_cust:{campaign_id}".encode())],
+        [Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
+
+
+async def show_edit_time_menu(event, campaign_id: int):
+    campaign = db.get_report_campaign(campaign_id)
+    if not campaign:
+        await _render(event, "Campaign not found.",
+                      buttons=[[Button.inline("Campaigns", b"cmp:list:0"), _main_button()]])
+        return
+    int_h = float(campaign.get("interval_hours") or 0)
+    dur_h = float(campaign.get("duration_hours") or 0)
+    text = (
+        f"**Edit Interval & Duration for Campaign #{campaign_id}**\n\n"
+        f"Current Repeat Interval: {_interval_text(int_h)}\n"
+        f"Current Run Duration: {_duration_text(dur_h, one_time=int_h<=0)}\n\n"
+        "Choose an interval setting:"
+    )
+    buttons = [
+        [Button.inline("Run Once (No Repeat)", f"cmp:ed_int_set:{campaign_id}:0".encode())],
+        [Button.inline("Every 1 Hour", f"cmp:ed_int_set:{campaign_id}:1".encode()),
+         Button.inline("Every 2 Hours", f"cmp:ed_int_set:{campaign_id}:2".encode())],
+        [Button.inline("Every 6 Hours", f"cmp:ed_int_set:{campaign_id}:6".encode()),
+         Button.inline("Every 12 Hours", f"cmp:ed_int_set:{campaign_id}:12".encode())],
+        [Button.inline("Custom Interval", f"cmp:ed_int_cust:{campaign_id}".encode()),
+         Button.inline("Custom Duration", f"cmp:ed_dur_cust:{campaign_id}".encode())],
+        [Button.inline("Back to Edit Menu", f"cmp:edit:{campaign_id}".encode())]
+    ]
+    await _render(event, text, buttons=buttons)
 
 
 async def show_campaign_list(event, user_id: int, offset: int = 0):
@@ -1051,7 +1300,7 @@ async def show_campaign_list(event, user_id: int, offset: int = 0):
 async def create_campaign(event, user_id: int, data: dict, start_now: bool = False):
     target = (data.get("target") or "").strip()
     messages = data.get("messages") or []
-    if not target or not messages:
+    if not target:
         await _render(event, 
             "Campaign data is incomplete. Start again.",
             buttons=[[Button.inline("New Campaign", b"cmp:new"), _main_button()]],
@@ -1084,9 +1333,10 @@ async def create_campaign(event, user_id: int, data: dict, start_now: bool = Fal
         "target": target,
         "account_phones": account_phones,
         "messages": messages,
-        "reports_per_message": max(2, int(data.get("reports_per_message") or CAMPAIGN_DEFAULT_REPORTS_PER_MESSAGE)),
+        "reports_per_message": max(1, int(data.get("reports_per_message") or CAMPAIGN_DEFAULT_REPORTS_PER_MESSAGE)),
         "delay_seconds": int(data.get("delay") or 5),
         "exec_mode": "safe",
+        "dist_mode": data.get("dist_mode") or "all",
         "reason": first.get("reason") or "spam",
         "reason_detail": first.get("detail") or "",
         "reason_option": first.get("option") or "",
@@ -1277,6 +1527,8 @@ async def _resume_campaign_flow(event, user_id: int, data: dict):
         await show_reports_prompt(event, data)
     elif step == "delay":
         await show_delay_prompt(event, data)
+    elif step == "dist":
+        await show_dist_prompt(event, data)
     elif step == "reason_choices":
         await show_reason_choices(event, data)
     elif step in ("reason", "reason_sub"):
@@ -1458,8 +1710,150 @@ async def handle_campaign_callback(event, data: str):
             await show_name_prompt(event, send=False)
             return
 
+        # Actions on existing campaigns (no active wizard flow required)
+        if action == "view" and arg:
+            await show_campaign_view(event, int(arg))
+            return
+        if action == "start" and arg:
+            campaign = db.get_report_campaign(int(arg))
+            reset = bool(campaign and campaign.get("status") in ("completed", "stopped"))
+            await _start_campaign(event, int(arg), reset_cycles=reset)
+            return
+        if action == "pause" and arg:
+            await _pause_campaign(event, int(arg), stopped=False)
+            return
+        if action == "stop" and arg:
+            await _pause_campaign(event, int(arg), stopped=True)
+            return
+        if action == "edit" and arg:
+            await show_campaign_edit_menu(event, int(arg))
+            return
         if action == "fixreasons" and arg:
             await start_campaign_reason_fix(event, user_id, int(arg))
+            return
+        if action == "ed_tgt" and arg:
+            await show_edit_target_prompt(event, int(arg))
+            return
+        if action == "ed_acc" and arg:
+            await show_edit_accounts_menu(event, int(arg))
+            return
+        if action == "ed_acc_all" and arg:
+            db.update_report_campaign(int(arg), account_phones=[])
+            await show_edit_accounts_menu(event, int(arg))
+            return
+        if action == "ed_acc_tog" and arg:
+            cid = int(arg)
+            phone = parts[3] if len(parts) > 3 else ""
+            campaign = db.get_report_campaign(cid)
+            if campaign and phone:
+                selected = list(campaign.get("account_phones") or [])
+                if not selected:
+                    selected = [phone]
+                else:
+                    if phone in selected:
+                        selected.remove(phone)
+                    else:
+                        selected.append(phone)
+                db.update_report_campaign(cid, account_phones=selected)
+            await show_edit_accounts_menu(event, cid)
+            return
+        if action == "ed_msg" and arg:
+            await show_edit_msg_menu(event, int(arg))
+            return
+        if action == "ed_scrape" and arg:
+            cid = int(arg)
+            limit = int(parts[3]) if len(parts) > 3 else 0
+            campaign = db.get_report_campaign(cid)
+            if not campaign:
+                await _render(event, "Campaign not found.")
+                return
+            if limit == 0:
+                db.update_report_campaign(cid, messages=[])
+                await show_campaign_edit_menu(event, cid)
+                return
+            await _render(event, f"Scraping {limit} posts from `{campaign.get('target')}`...")
+            try:
+                links = await scrape_recent_messages(campaign.get("target"), limit=limit)
+                db.update_report_campaign(cid, messages=links, last_result=f"Scraped {len(links)} posts.")
+            except Exception as e:
+                await event.respond(f"Scrape error: {e}")
+            await show_campaign_edit_menu(event, cid)
+            return
+        if action == "ed_msg_cust" and arg:
+            db.set_user_state(user_id, CAMPAIGN_STATE, {"step": "edit_msg_cust", "edit_campaign_id": int(arg)})
+            text, buttons = _custom_prompt(
+                f"**Scrape Posts for Campaign #{arg}**\n\nSend the number of recent posts to scrape (1 to {CAMPAIGN_MAX_POSTS}):",
+                f"cmp:ed_msg:{arg}".encode()
+            )
+            await _render(event, text, buttons=buttons)
+            return
+        if action == "ed_dist" and arg:
+            await show_edit_dist_menu(event, int(arg))
+            return
+        if action == "ed_dist_set" and arg:
+            cid = int(arg)
+            mode = parts[3] if len(parts) > 3 else "all"
+            db.update_report_campaign(cid, dist_mode=mode)
+            await show_edit_dist_menu(event, cid)
+            return
+        if action == "ed_rpm" and arg:
+            await show_edit_rpm_menu(event, int(arg))
+            return
+        if action == "ed_rpm_set" and arg:
+            cid = int(arg)
+            val = int(parts[3]) if len(parts) > 3 else 2
+            db.update_report_campaign(cid, reports_per_message=val)
+            await show_campaign_edit_menu(event, cid)
+            return
+        if action == "ed_rpm_cust" and arg:
+            db.set_user_state(user_id, CAMPAIGN_STATE, {"step": "edit_rpm_cust", "edit_campaign_id": int(arg)})
+            text, buttons = _custom_prompt(
+                f"**Custom Reports Per Link for Campaign #{arg}**\n\nSend a number from 1 to 50:",
+                f"cmp:ed_rpm:{arg}".encode()
+            )
+            await _render(event, text, buttons=buttons)
+            return
+        if action == "ed_dly" and arg:
+            await show_edit_delay_menu(event, int(arg))
+            return
+        if action == "ed_dly_set" and arg:
+            cid = int(arg)
+            val = int(parts[3]) if len(parts) > 3 else 5
+            db.update_report_campaign(cid, delay_seconds=val)
+            await show_campaign_edit_menu(event, cid)
+            return
+        if action == "ed_dly_cust" and arg:
+            db.set_user_state(user_id, CAMPAIGN_STATE, {"step": "edit_delay_cust", "edit_campaign_id": int(arg)})
+            text, buttons = _custom_prompt(
+                f"**Custom Delay for Campaign #{arg}**\n\nSend delay in seconds (1 to 3600):",
+                f"cmp:ed_dly:{arg}".encode()
+            )
+            await _render(event, text, buttons=buttons)
+            return
+        if action == "ed_time" and arg:
+            await show_edit_time_menu(event, int(arg))
+            return
+        if action == "ed_int_set" and arg:
+            cid = int(arg)
+            hrs = float(parts[3]) if len(parts) > 3 else 0.0
+            db.update_report_campaign(cid, interval_hours=hrs, max_cycles=1 if hrs <= 0 else 0)
+            await show_edit_time_menu(event, cid)
+            return
+        if action == "ed_int_cust" and arg:
+            db.set_user_state(user_id, CAMPAIGN_STATE, {"step": "edit_int_cust", "edit_campaign_id": int(arg)})
+            text, buttons = _custom_prompt(
+                f"**Custom Interval for Campaign #{arg}**\n\nSend hours between cycles (0.1 to 720):",
+                f"cmp:ed_time:{arg}".encode()
+            )
+            await _render(event, text, buttons=buttons)
+            return
+        if action == "ed_dur_cust" and arg:
+            db.set_user_state(user_id, CAMPAIGN_STATE, {"step": "edit_dur_cust", "edit_campaign_id": int(arg)})
+            text, buttons = _custom_prompt(
+                f"**Custom Duration for Campaign #{arg}**\n\nSend duration in days or hours (e.g. 1.5, 2 days, 36h, or 0 for unlimited):",
+                f"cmp:ed_time:{arg}".encode()
+            )
+            await _render(event, text, buttons=buttons)
             return
 
         flow = _require_flow(event, user_id)
@@ -1495,6 +1889,11 @@ async def handle_campaign_callback(event, data: str):
             _save_flow(user_id, flow)
             await show_delay_prompt(event, flow)
             return
+        if action == "back_dist":
+            flow["step"] = "dist"
+            _save_flow(user_id, flow)
+            await show_dist_prompt(event, flow)
+            return
         if action == "back_reason":
             pages = flow.get("reason_pages") or []
             if pages:
@@ -1504,9 +1903,9 @@ async def handle_campaign_callback(event, data: str):
                 _save_flow(user_id, flow)
                 await show_stored_reason_page(event, flow)
             else:
-                flow["step"] = "reason"
+                flow["step"] = "dist"
                 _save_flow(user_id, flow)
-                await show_reason_prompt(event, flow)
+                await show_dist_prompt(event, flow)
             return
         if action == "back_rsub":
             pages = flow.get("reason_pages") or []
@@ -1614,6 +2013,12 @@ async def handle_campaign_callback(event, data: str):
             return
         if action == "delay":
             flow["delay"] = max(1, int(arg or 5))
+            flow["step"] = "dist"
+            _save_flow(user_id, flow)
+            await show_dist_prompt(event, flow)
+            return
+        if action == "dist":
+            flow["dist_mode"] = arg or "all"
             flow["step"] = "reason"
             _save_flow(user_id, flow)
             await show_reason_prompt(event, flow)
@@ -1850,21 +2255,6 @@ async def handle_campaign_callback(event, data: str):
             await create_campaign(event, user_id, flow, start_now=True)
             return
 
-        if action == "view" and arg:
-            await show_campaign_view(event, int(arg))
-            return
-        if action == "start" and arg:
-            campaign = db.get_report_campaign(int(arg))
-            reset = bool(campaign and campaign.get("status") in ("completed", "stopped"))
-            await _start_campaign(event, int(arg), reset_cycles=reset)
-            return
-        if action == "pause" and arg:
-            await _pause_campaign(event, int(arg), stopped=False)
-            return
-        if action == "stop" and arg:
-            await _pause_campaign(event, int(arg), stopped=True)
-            return
-
         await event.answer("This campaign option is no longer available.", alert=True)
     except Exception as exc:
         error = redact_sensitive(exc, 300)
@@ -1948,9 +2338,107 @@ async def handle_campaign_text(event, data: dict):
             await event.respond("Send a delay from 1 to 3600 seconds.")
             return
         data["delay"] = delay
-        data["step"] = "reason"
+        data["step"] = "dist"
         _save_flow(user_id, data)
-        await show_reason_prompt(event, data)
+        await show_dist_prompt(event, data)
+        return
+
+    if step == "edit_target":
+        cid = int(data.get("edit_campaign_id") or 0)
+        if not text:
+            await event.respond("Send a valid channel username or link.")
+            return
+        campaign = db.get_report_campaign(cid)
+        update_fields = {"target": text, "last_result": "Target updated."}
+        if campaign and (not campaign.get("name") or campaign.get("name") == campaign.get("target")):
+            update_fields["name"] = text
+        db.update_report_campaign(cid, **update_fields)
+        db.clear_user_state(user_id)
+        await show_campaign_edit_menu(event, cid)
+        return
+
+    if step == "edit_msg_cust":
+        cid = int(data.get("edit_campaign_id") or 0)
+        try:
+            limit = int(text)
+        except ValueError:
+            await event.respond("Send a valid number.")
+            return
+        if not 1 <= limit <= CAMPAIGN_MAX_POSTS:
+            await event.respond(f"Send a number from 1 to {CAMPAIGN_MAX_POSTS}.")
+            return
+        campaign = db.get_report_campaign(cid)
+        if not campaign:
+            await event.respond("Campaign not found.")
+            return
+        await event.respond(f"Scraping {limit} posts from `{campaign.get('target')}`...")
+        try:
+            links = await scrape_recent_messages(campaign.get("target"), limit=limit)
+            db.update_report_campaign(cid, messages=links, last_result=f"Scraped {len(links)} posts.")
+        except Exception as e:
+            await event.respond(f"Scrape error: {e}")
+            return
+        db.clear_user_state(user_id)
+        await show_campaign_edit_menu(event, cid)
+        return
+
+    if step == "edit_rpm_cust":
+        cid = int(data.get("edit_campaign_id") or 0)
+        try:
+            count = int(text)
+        except ValueError:
+            await event.respond("Send a valid number.")
+            return
+        if not 1 <= count <= 50:
+            await event.respond("Send a number from 1 to 50.")
+            return
+        db.update_report_campaign(cid, reports_per_message=count)
+        db.clear_user_state(user_id)
+        await show_campaign_edit_menu(event, cid)
+        return
+
+    if step == "edit_delay_cust":
+        cid = int(data.get("edit_campaign_id") or 0)
+        try:
+            dly = int(text)
+        except ValueError:
+            await event.respond("Send a valid number.")
+            return
+        if not 1 <= dly <= 3600:
+            await event.respond("Send a delay from 1 to 3600 seconds.")
+            return
+        db.update_report_campaign(cid, delay_seconds=dly)
+        db.clear_user_state(user_id)
+        await show_campaign_edit_menu(event, cid)
+        return
+
+    if step == "edit_int_cust":
+        cid = int(data.get("edit_campaign_id") or 0)
+        try:
+            hours = float(text.replace(",", "."))
+        except ValueError:
+            await event.respond("Send a valid number of hours.")
+            return
+        if not 0.1 <= hours <= 720:
+            await event.respond("Send an interval from 0.1 to 720 hours.")
+            return
+        db.update_report_campaign(cid, interval_hours=hours, max_cycles=0)
+        db.clear_user_state(user_id)
+        await show_campaign_edit_menu(event, cid)
+        return
+
+    if step == "edit_dur_cust":
+        cid = int(data.get("edit_campaign_id") or 0)
+        hours = _parse_duration(text)
+        if hours is None:
+            await event.respond("Send a valid duration, for example 1.5, 2 days or 36h.")
+            return
+        if hours > 8760:
+            await event.respond("Send a duration of 365 days or less.")
+            return
+        db.update_report_campaign(cid, duration_hours=hours)
+        db.clear_user_state(user_id)
+        await show_campaign_edit_menu(event, cid)
         return
 
     if step == "comment_text":
